@@ -150,19 +150,27 @@ impl App {
         }
     }
 
-    /// Items shown in the items pane, after group and hide-done filtering.
+    /// Items shown in the items pane, after group and hide-done filtering,
+    /// in the order the query asks for.
     pub fn visible_items(&self) -> Vec<&Item> {
         let group_file = self.selected_group().map(|g| &g.todo_file);
-        self.workspace
+        let mut items: Vec<(&Item, Option<&str>)> = self
+            .workspace
             .items
             .iter()
             .filter(|item| group_file.is_none_or(|f| &item.file == f))
             .filter(|item| !(self.hide_done && item.done))
-            .filter(|item| match &self.query {
-                Some(query) => query.matches(item, self.workspace.group_name_for(item)),
+            .map(|item| (item, self.workspace.group_name_for(item)))
+            .filter(|(item, group)| match &self.query {
+                Some(query) => query.matches(item, *group),
                 None => true,
             })
-            .collect()
+            .collect();
+
+        if let Some(query) = &self.query {
+            query.sort_items(&mut items);
+        }
+        items.into_iter().map(|(item, _)| item).collect()
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -389,6 +397,7 @@ impl App {
                 }
             }
             (K::Char('?'), _) => self.open_modal("keys", help_lines()),
+            (K::Char('N'), KeyModifiers::SHIFT) => self.show_notes(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
             (K::Char('S'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Summarize, String::new()),
             (K::Char('b'), KeyModifiers::NONE) => match self.selected_item() {
@@ -579,6 +588,29 @@ impl App {
         ticker.fill(entries.into_iter());
     }
 
+    /// Show the selected group's notes sidecar.
+    ///
+    /// `notes_glob` is detected and recorded per group; this is what makes it
+    /// worth recording.
+    fn show_notes(&mut self) {
+        let Some(group) = self.selected_group() else {
+            self.notice = Some("select a group to read its notes".to_string());
+            return;
+        };
+        let name = group.name.clone();
+        let Some(path) = group.notes_file.clone() else {
+            self.notice = Some(format!("{name} has no notes file"));
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let body: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+                self.open_modal(&format!("{name} notes"), body);
+            }
+            Err(err) => self.notice = Some(format!("could not read {}: {err}", path.display())),
+        }
+    }
+
     fn open_modal(&mut self, title: &str, body: Vec<String>) {
         self.modal = Some((title.to_string(), body));
         self.mode = Mode::Modal;
@@ -748,6 +780,9 @@ fn help_lines() -> Vec<String> {
         "",
         "chyron",
         "  c  toggle ticker      p  pause",
+        "",
+        "groups",
+        "  N  read the selected group's notes.md",
         "  +/-  faster/slower",
         "",
         "  ?  this help          q  quit",
@@ -1202,6 +1237,53 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn shift_n_reads_the_group_notes_sidecar() {
+        let (dir, mut app) = disk_app(DOC);
+        std::fs::write(dir.path().join("lefv/notes.md"), "background\nreading\n").unwrap();
+        // Re-detect so the sidecar is picked up.
+        app.config.workspace.notes_glob = Some("*/notes.md".to_string());
+        app.reload();
+
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('j')); // select "lefv"
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+
+        let (title, body) = app.modal.clone().expect("notes modal opened");
+        assert!(title.contains("lefv"));
+        assert!(body.contains(&"background".to_string()));
+    }
+
+    #[test]
+    fn shift_n_explains_when_a_group_has_no_notes() {
+        let (_d, mut app) = disk_app(DOC);
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert!(app.modal.is_none());
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no notes file"),
+            "got {:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn shift_n_on_the_all_row_asks_for_a_group() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(app.selected_group().is_none(), "all is selected");
+        app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("select a group")
         );
     }
 

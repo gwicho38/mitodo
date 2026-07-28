@@ -87,14 +87,19 @@ fn write_list(
 ) -> io::Result<()> {
     let mut shown = 0usize;
     for group in &workspace.groups {
-        let items: Vec<_> = workspace
+        let mut items: Vec<_> = workspace
             .items_for_group(&group.name)
             .into_iter()
-            .filter(|item| match query {
-                Some(q) => q.matches(item, workspace.group_name_for(item)),
+            .map(|item| (item, workspace.group_name_for(item)))
+            .filter(|(item, group)| match query {
+                Some(q) => q.matches(item, *group),
                 None => true,
             })
             .collect();
+        if let Some(q) = query {
+            q.sort_items(&mut items);
+        }
+        let items: Vec<_> = items.into_iter().map(|(item, _)| item).collect();
         if items.is_empty() && query.is_some() {
             continue;
         }

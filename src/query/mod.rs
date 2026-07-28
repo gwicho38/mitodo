@@ -12,6 +12,7 @@
 //! has:desc           has a description block
 //! text:"onehouse"    substring, case-insensitive
 //! onehouse           bare word — same as text:
+//! sort:pri,text      ordering; pri, text, group, section, done
 //! AND OR NOT ( )     combinators; adjacency implies AND
 //! ```
 
@@ -74,29 +75,102 @@ pub enum Clause {
     Atom(Atom),
 }
 
+/// A field the result list can be ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    Priority,
+    Text,
+    Group,
+    Section,
+    Done,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
-    clause: Clause,
+    clause: Option<Clause>,
+    sort: Vec<SortKey>,
 }
 
 impl Query {
     pub fn parse(source: &str) -> Result<Option<Query>, QueryError> {
-        let tokens = tokenize(source)?;
-        if tokens.is_empty() {
-            return Ok(None);
+        let all = tokenize(source)?;
+        // `sort:` is an instruction about the result list rather than a
+        // predicate, so it is lifted out before the clause is parsed.
+        let mut sort = Vec::new();
+        let mut tokens = Vec::new();
+        for token in all {
+            match token
+                .split_once(':')
+                .filter(|(field, _)| field.eq_ignore_ascii_case("sort"))
+            {
+                Some((_, spec)) => sort.extend(parse_sort(&unquote(spec))?),
+                None => tokens.push(token),
+            }
         }
+
+        if tokens.is_empty() {
+            return match sort.is_empty() {
+                true => Ok(None),
+                false => Ok(Some(Query { clause: None, sort })),
+            };
+        }
+
         let mut parser = Parser { tokens, pos: 0 };
         let clause = parser.parse_or()?;
         if parser.pos < parser.tokens.len() {
             return Err(QueryError::Unexpected(parser.tokens[parser.pos].clone()));
         }
-        Ok(Some(Query { clause }))
+        Ok(Some(Query {
+            clause: Some(clause),
+            sort,
+        }))
     }
 
     /// `group` is the name of the group the item belongs to, needed by `acct:`.
     pub fn matches(&self, item: &Item, group: Option<&str>) -> bool {
-        eval(&self.clause, item, group)
+        match &self.clause {
+            Some(clause) => eval(clause, item, group),
+            None => true,
+        }
     }
+
+    /// Order items in place. A stable sort, so items compare equal on every
+    /// key keep the order they had in the file.
+    pub fn sort_items<'a>(&self, items: &mut [(&'a Item, Option<&'a str>)]) {
+        if self.sort.is_empty() {
+            return;
+        }
+        items.sort_by(|(a, a_group), (b, b_group)| {
+            for key in &self.sort {
+                let ordering = match key {
+                    SortKey::Priority => a.priority.cmp(&b.priority),
+                    SortKey::Text => a.text.to_lowercase().cmp(&b.text.to_lowercase()),
+                    SortKey::Group => a_group.unwrap_or("").cmp(b_group.unwrap_or("")),
+                    SortKey::Section => a.section.cmp(&b.section),
+                    SortKey::Done => a.done.cmp(&b.done),
+                };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+}
+
+fn parse_sort(spec: &str) -> Result<Vec<SortKey>, QueryError> {
+    spec.split(',')
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_lowercase().as_str() {
+            "pri" | "priority" => Ok(SortKey::Priority),
+            "text" => Ok(SortKey::Text),
+            "acct" | "account" | "group" => Ok(SortKey::Group),
+            "sec" | "section" => Ok(SortKey::Section),
+            "done" => Ok(SortKey::Done),
+            other => Err(QueryError::UnknownField(format!("sort:{other}"))),
+        })
+        .collect()
 }
 
 fn eval(clause: &Clause, item: &Item, group: Option<&str>) -> bool {
@@ -443,6 +517,101 @@ mod tests {
         let it = item("file 83(b)", false, Priority::P0);
         assert!(matches("pri:P0 acct:lefv !done", &it, Some("lefv")));
         assert!(!matches("pri:P0 acct:lefv !done", &it, Some("jzlaw")));
+    }
+
+    fn sorted(query: &str, items: &[Item]) -> Vec<String> {
+        let parsed = Query::parse(query).unwrap().unwrap();
+        let mut pairs: Vec<(&Item, Option<&str>)> = items.iter().map(|i| (i, Some("g"))).collect();
+        parsed.sort_items(&mut pairs);
+        pairs.into_iter().map(|(i, _)| i.text.clone()).collect()
+    }
+
+    #[test]
+    fn sort_orders_by_priority() {
+        let items = [
+            item("c", false, Priority::P2),
+            item("a", false, Priority::P0),
+            item("b", false, Priority::P1),
+        ];
+        assert_eq!(sorted("sort:pri", &items), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn sort_orders_by_text() {
+        let items = [
+            item("charlie", false, Priority::P0),
+            item("alpha", false, Priority::P0),
+        ];
+        assert_eq!(sorted("sort:text", &items), vec!["alpha", "charlie"]);
+    }
+
+    #[test]
+    fn sort_keys_apply_in_order() {
+        let items = [
+            item("zeta", false, Priority::P1),
+            item("alpha", false, Priority::P1),
+            item("beta", false, Priority::P0),
+        ];
+        assert_eq!(
+            sorted("sort:pri,text", &items),
+            vec!["beta", "alpha", "zeta"],
+            "priority first, then text within a band"
+        );
+    }
+
+    #[test]
+    fn sort_puts_open_items_before_done_ones() {
+        let items = [
+            item("done", true, Priority::P0),
+            item("open", false, Priority::P0),
+        ];
+        assert_eq!(sorted("sort:done", &items), vec!["open", "done"]);
+    }
+
+    #[test]
+    fn sort_composes_with_a_filter() {
+        let parsed = Query::parse("!done sort:pri").unwrap().unwrap();
+        let done = item("x", true, Priority::P0);
+        let open = item("y", false, Priority::P1);
+        assert!(!parsed.matches(&done, None), "filter still applies");
+        assert!(parsed.matches(&open, None));
+
+        let items = [
+            item("b", false, Priority::P1),
+            item("a", false, Priority::P0),
+        ];
+        assert_eq!(
+            sorted("!done sort:pri", &items),
+            vec!["a", "b"],
+            "and the sort still applies"
+        );
+    }
+
+    #[test]
+    fn a_query_that_is_only_a_sort_matches_everything() {
+        let parsed = Query::parse("sort:pri").unwrap().unwrap();
+        assert!(parsed.matches(&item("anything", true, Priority::None), None));
+    }
+
+    #[test]
+    fn sorting_is_stable_within_equal_keys() {
+        let items = [
+            item("first", false, Priority::P0),
+            item("second", false, Priority::P0),
+        ];
+        assert_eq!(
+            sorted("sort:pri", &items),
+            vec!["first", "second"],
+            "file order preserved when the key ties"
+        );
+    }
+
+    #[test]
+    fn an_unknown_sort_key_is_rejected() {
+        assert_eq!(
+            Query::parse("sort:bogus"),
+            Err(QueryError::UnknownField("sort:bogus".to_string()))
+        );
     }
 
     #[test]
