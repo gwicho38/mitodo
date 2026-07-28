@@ -33,6 +33,10 @@ pub fn input_reader(message_sender: UnboundedSender<Message>) -> color_eyre::Res
             event::Event::Mouse(mouse_event) => {
                 // Moved events flood the queue and nothing consumes them.
                 if !matches!(mouse_event.kind, MouseEventKind::Moved) {
+                    trace!(
+                        "mouse {:?} at ({}, {})",
+                        mouse_event.kind, mouse_event.column, mouse_event.row
+                    );
                     message_sender.send(Message::Event(Event::Mouse(mouse_event)))?;
                 }
             }

@@ -27,6 +27,7 @@ fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
 ///
 /// Mirrors eilmeldung's layout so later stages can drop the command line and
 /// popups in without moving anything.
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Frames {
     pub top_bar: Rect,
     pub groups: Rect,
@@ -36,7 +37,9 @@ pub struct Frames {
     pub status: Rect,
 }
 
-pub fn split(area: Rect, command_line_visible: bool) -> Frames {
+/// `items_height` overrides the items/detail split, as set by dragging the
+/// divider between them.
+pub fn split_with(area: Rect, command_line_visible: bool, items_height: Option<u16>) -> Frames {
     let [top_bar, middle, command_line, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -54,7 +57,10 @@ pub fn split(area: Rect, command_line_visible: bool) -> Frames {
 
     let [items, detail] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(65), Constraint::Min(0)])
+        .constraints(match items_height {
+            Some(h) => [Constraint::Length(h), Constraint::Min(0)],
+            None => [Constraint::Percentage(65), Constraint::Min(0)],
+        })
         .areas(right);
 
     Frames {
@@ -69,12 +75,15 @@ pub fn split(area: Rect, command_line_visible: bool) -> Frames {
 
 /// Render the whole screen. Kept free of I/O so it can be exercised headlessly
 /// against a `TestBackend`.
-pub fn render(app: &App, frame: &mut Frame) {
+///
+/// Returns the layout it used, so mouse events can be hit-tested against the
+/// panes actually on screen rather than a guess.
+pub fn render(app: &App, frame: &mut Frame) -> Frames {
     let editing = matches!(
         app.mode,
         Mode::EditingQuery | Mode::Editing(_) | Mode::AskingAgent(_)
     );
-    let f = split(frame.area(), editing);
+    let f = split_with(frame.area(), editing, app.items_height);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
     render_items(app, frame, f.items);
@@ -84,6 +93,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     }
     render_status(app, frame, f.status);
     render_overlay(app, frame, frame.area());
+    f
 }
 
 /// Modal and change-set review share one centred overlay.
@@ -440,7 +450,11 @@ mod tests {
     /// Flatten the rendered buffer into one string per row.
     fn draw_app(app: &App, width: u16, height: u16) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(app, frame)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(app, frame);
+            })
+            .unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..height)
             .map(|y| {

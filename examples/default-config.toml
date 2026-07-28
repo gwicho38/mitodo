@@ -57,6 +57,9 @@ pattern = 'due:(\d{4}-\d{2}-\d{2})'
 # alone during an ordinary session.
 hide_done = false
 ticker    = false
+# Capture the mouse for click, scroll and divider drag. Turning this off gives
+# your terminal back its own selection and scrollback.
+mouse     = true
 
 # --------------------------------------------------------------------------
 # Optional: an external agent.

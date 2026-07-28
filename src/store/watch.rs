@@ -46,13 +46,20 @@ pub fn any_changed(files: &[PathBuf], known: &HashMap<PathBuf, [u8; 32]>) -> boo
     known.keys().any(|k| !files.contains(k))
 }
 
-/// Watch `root` and invoke `on_change` when watched files actually differ.
+/// How long to wait before checking whether the consumer is still there.
 ///
-/// Runs until the callback returns `false`. Blocking, so callers put it on a
-/// dedicated thread.
-pub fn watch_blocking<F>(root: &Path, files: Vec<PathBuf>, mut on_change: F)
+/// Without this the loop would park in `recv` forever, and a watcher that
+/// cannot notice its consumer has gone keeps the process alive after quit.
+const LIVENESS_POLL: Duration = Duration::from_millis(500);
+
+/// Watch `root` and call `notify` when watched files actually differ.
+///
+/// `notify(true)` means "the files changed"; `notify(false)` is a periodic
+/// liveness check that sends nothing. Either returning `false` stops the watch.
+/// Blocking, so callers put it on a dedicated thread.
+pub fn watch_blocking<F>(root: &Path, files: Vec<PathBuf>, mut notify: F)
 where
-    F: FnMut() -> bool,
+    F: FnMut(bool) -> bool,
 {
     let (tx, rx) = std_mpsc::channel();
     let mut watcher = match notify::recommended_watcher(move |res| {
@@ -75,11 +82,22 @@ where
     let mut known = digests(&files);
 
     loop {
-        // Block until something happens, then drain the burst.
-        let Ok(first) = rx.recv() else {
-            debug!("watcher channel closed");
-            return;
+        // Wake periodically even when nothing happens, so a quit is noticed.
+        let first = match rx.recv_timeout(LIVENESS_POLL) {
+            Ok(event) => event,
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                if notify(false) {
+                    continue;
+                }
+                debug!("watch consumer is gone; stopping");
+                return;
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                debug!("watcher channel closed");
+                return;
+            }
         };
+
         let mut interesting = is_interesting(&first.kind);
         while let Ok(event) = rx.recv_timeout(DEBOUNCE) {
             interesting |= is_interesting(&event.kind);
@@ -90,7 +108,7 @@ where
 
         if any_changed(&files, &known) {
             known = digests(&files);
-            if !on_change() {
+            if !notify(true) {
                 return;
             }
         }
@@ -170,6 +188,38 @@ mod tests {
             any_changed(&[first, second], &known),
             "a file with no known digest counts as changed"
         );
+    }
+
+    #[test]
+    fn the_watch_stops_when_its_consumer_goes_away() {
+        // Regression: the loop used to park in recv() forever, so quitting the
+        // UI left the process alive with nothing to notify.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("TODO.md");
+        std::fs::write(&file, "- [ ] a\n").unwrap();
+
+        let polls = Arc::new(AtomicUsize::new(0));
+        let seen = polls.clone();
+        let root = dir.path().to_path_buf();
+        let files = vec![file];
+
+        let handle = std::thread::spawn(move || {
+            watch_blocking(&root, files, move |changed| {
+                if !changed {
+                    // Report "consumer gone" on the second liveness poll.
+                    return seen.fetch_add(1, Ordering::SeqCst) < 1;
+                }
+                true
+            });
+        });
+
+        handle
+            .join()
+            .expect("watch returns rather than parking forever");
+        assert!(polls.load(Ordering::SeqCst) >= 1, "liveness was polled");
     }
 
     #[test]

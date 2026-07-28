@@ -37,12 +37,30 @@ pub struct Config {
 }
 
 /// View state that survives a restart, the way `mcli todos` remembered it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiConfig {
     #[serde(default)]
     pub hide_done: bool,
     #[serde(default)]
     pub ticker: bool,
+    /// Capture the mouse for click, scroll and drag. Turning this off hands
+    /// selection and scrollback back to the terminal emulator.
+    #[serde(default = "yes")]
+    pub mouse: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            hide_done: false,
+            ticker: false,
+            mouse: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -174,10 +192,27 @@ fn expand_tilde(path: &Path) -> Result<PathBuf, ConfigError> {
     Ok(home.join(rest.trim_start_matches('/')))
 }
 
-/// `~/.config/mitodo/config.toml` on Linux and macOS.
+/// `$XDG_CONFIG_HOME/mitodo/config.toml`, else `~/.config/mitodo/config.toml`.
+///
+/// Deliberately XDG on every platform rather than the OS-native location.
+/// `directories` would put this in `~/Library/Application Support` on macOS,
+/// which is not where anyone looks for a terminal tool's config — helix, yazi
+/// and starship all use `~/.config` there too.
 pub fn default_config_path() -> Result<PathBuf, ConfigError> {
-    let dirs = directories::ProjectDirs::from("", "", "mitodo").ok_or(ConfigError::NoHomeDir)?;
-    Ok(dirs.config_dir().join("config.toml"))
+    Ok(config_root()?.join("mitodo").join("config.toml"))
+}
+
+fn config_root() -> Result<PathBuf, ConfigError> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
+        && !xdg.trim().is_empty()
+    {
+        return Ok(PathBuf::from(xdg));
+    }
+    let home = directories::BaseDirs::new()
+        .ok_or(ConfigError::NoHomeDir)?
+        .home_dir()
+        .to_path_buf();
+    Ok(home.join(".config"))
 }
 
 #[cfg(test)]
@@ -203,6 +238,22 @@ pattern = "^P([0-3])"
 enabled = true
 sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"]]
 "#;
+
+    #[test]
+    fn the_config_path_is_xdg_on_every_platform() {
+        // Not `~/Library/Application Support` on macOS: a terminal tool's
+        // config belongs where people look for it.
+        let path = default_config_path().unwrap();
+        let text = path.to_string_lossy();
+        assert!(
+            text.ends_with("mitodo/config.toml"),
+            "unexpected path: {text}"
+        );
+        assert!(
+            !text.contains("Application Support"),
+            "should not use the macOS native location: {text}"
+        );
+    }
 
     #[test]
     fn ui_state_defaults_to_off_and_round_trips() {

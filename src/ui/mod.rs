@@ -2,7 +2,10 @@ pub mod chyron;
 mod view;
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::agent::{self, ChangeSet, Verb};
@@ -99,6 +102,12 @@ pub struct App {
     pub busy: Option<String>,
     /// Scrolling ticker, when enabled.
     pub ticker: Option<TickerState>,
+    /// Height of the items pane when the divider has been dragged.
+    pub items_height: Option<u16>,
+    /// Layout of the last frame drawn, for hit-testing mouse events.
+    layout: view::Frames,
+    /// True while the items/detail divider is being dragged.
+    dragging_divider: bool,
     sender: Option<UnboundedSender<Msg>>,
     config: Config,
     /// Where to write remembered view state on exit.
@@ -129,6 +138,9 @@ impl App {
             pending: None,
             busy: None,
             ticker,
+            items_height: None,
+            layout: view::Frames::default(),
+            dragging_divider: false,
             sender: None,
             should_quit: false,
         }
@@ -156,6 +168,8 @@ impl App {
         let current = crate::config::UiConfig {
             hide_done: self.hide_done,
             ticker: self.ticker.is_some(),
+            // Not a view toggle; preserve whatever the user configured.
+            mouse: self.config.ui.mouse,
         };
         if current == self.config.ui {
             return;
@@ -223,7 +237,11 @@ impl App {
         mut messages: UnboundedReceiver<Message>,
         mut terminal: DefaultTerminal,
     ) -> Result<()> {
-        terminal.draw(|frame| view::render(&self, frame))?;
+        let mut drawn = None;
+        terminal.draw(|frame| drawn = Some(view::render(&self, frame)))?;
+        if let Some(frames) = drawn {
+            self.layout = frames;
+        }
 
         while let Some(message) = messages.recv().await {
             self.handle(message);
@@ -232,7 +250,11 @@ impl App {
                 self.persist_ui_state();
                 break;
             }
-            terminal.draw(|frame| view::render(&self, frame))?;
+            let mut drawn = None;
+            terminal.draw(|frame| drawn = Some(view::render(&self, frame)))?;
+            if let Some(frames) = drawn {
+                self.layout = frames;
+            }
         }
 
         Ok(())
@@ -244,7 +266,7 @@ impl App {
             Message::Event(Event::Quit) => self.should_quit = true,
             // A redraw follows every message, so a resize needs no handling.
             Message::Event(Event::Resized(..)) => {}
-            Message::Event(Event::Mouse(_)) => {}
+            Message::Event(Event::Mouse(mouse)) => self.handle_mouse(mouse),
             Message::Event(Event::Tick) => {
                 if let Some(mut ticker) = self.ticker.take() {
                     ticker.advance();
@@ -461,6 +483,92 @@ impl App {
                 self.mode = Mode::ConfirmingDelete;
             }
             _ => {}
+        }
+    }
+
+    /// Route a mouse event to whichever pane it landed in.
+    ///
+    /// Hit-tested against the layout of the frame actually on screen, so a
+    /// dragged divider or a visible command line does not throw the maths off.
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Modal and prompt states own the screen; ignore clicks behind them.
+        if self.mode != Mode::Normal {
+            return;
+        }
+        let (x, y) = (mouse.column, mouse.row);
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => self.scroll_at(x, y, 1),
+            MouseEventKind::ScrollUp => self.scroll_at(x, y, -1),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.on_divider(y) && within_x(self.layout.items, x) {
+                    self.dragging_divider = true;
+                } else {
+                    self.click_at(x, y);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.dragging_divider => {
+                self.drag_divider(y)
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.dragging_divider = false,
+            _ => {}
+        }
+    }
+
+    /// The divider is the items pane's bottom border row.
+    fn on_divider(&self, y: u16) -> bool {
+        let items = self.layout.items;
+        items.height > 0 && y == items.y + items.height - 1
+    }
+
+    fn drag_divider(&mut self, y: u16) {
+        let items = self.layout.items;
+        // Keep both panes usable: a border pair plus a row of content each.
+        let min = 3u16;
+        let max_bottom = self.layout.detail.y + self.layout.detail.height;
+        let height = y.saturating_sub(items.y).saturating_add(1);
+        self.items_height = Some(height.clamp(min, max_bottom.saturating_sub(items.y + min)));
+    }
+
+    fn scroll_at(&mut self, x: u16, y: u16, delta: isize) {
+        let previous = self.focus;
+        if within(self.layout.groups, x, y) {
+            self.focus = Focus::Groups;
+        } else if within(self.layout.items, x, y) {
+            self.focus = Focus::Items;
+        } else {
+            return;
+        }
+        self.move_cursor(delta);
+        // Scrolling reads; it should not steal focus from what you were typing.
+        self.focus = if previous == self.focus {
+            self.focus
+        } else {
+            previous
+        };
+    }
+
+    fn click_at(&mut self, x: u16, y: u16) {
+        if within(self.layout.groups, x, y) {
+            if let Some(index) = row_index(self.layout.groups, y) {
+                let rows = self.workspace.groups.len() + 1;
+                let start =
+                    viewport_start(self.group_cursor, rows, content_height(self.layout.groups));
+                if start + index < rows {
+                    self.focus = Focus::Groups;
+                    self.group_cursor = start + index;
+                    self.item_cursor = 0;
+                }
+            }
+        } else if within(self.layout.items, x, y)
+            && let Some(index) = row_index(self.layout.items, y)
+        {
+            let len = self.visible_items().len();
+            let start = viewport_start(self.item_cursor, len, content_height(self.layout.items));
+            if start + index < len {
+                self.focus = Focus::Items;
+                self.item_cursor = start + index;
+            }
         }
     }
 
@@ -875,6 +983,31 @@ fn help_lines() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+fn within(rect: Rect, x: u16, y: u16) -> bool {
+    rect.width > 0
+        && rect.height > 0
+        && x >= rect.x
+        && x < rect.x + rect.width
+        && y >= rect.y
+        && y < rect.y + rect.height
+}
+
+fn within_x(rect: Rect, x: u16) -> bool {
+    rect.width > 0 && x >= rect.x && x < rect.x + rect.width
+}
+
+/// Rows a bordered pane can show.
+fn content_height(rect: Rect) -> usize {
+    rect.height.saturating_sub(2) as usize
+}
+
+/// Which content row a click landed on, ignoring the border rows.
+fn row_index(rect: Rect, y: u16) -> Option<usize> {
+    let first = rect.y + 1;
+    let last = rect.y + rect.height.saturating_sub(1);
+    (y >= first && y < last).then(|| (y - first) as usize)
 }
 
 /// First visible row so that `cursor` sits inside a window of `height` rows.
@@ -1470,6 +1603,196 @@ mod tests {
                 .unwrap_or_default()
                 .contains("select a group")
         );
+    }
+
+    // --- mouse ---
+
+    fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Give the app a known layout, as though a frame had been drawn.
+    fn with_layout(app: &mut App) {
+        app.layout = view::split_with(Rect::new(0, 0, 100, 24), false, None);
+    }
+
+    #[test]
+    fn hit_testing_respects_pane_bounds() {
+        let r = Rect::new(10, 5, 20, 8);
+        assert!(within(r, 10, 5), "top-left corner is inside");
+        assert!(within(r, 29, 12), "bottom-right corner is inside");
+        assert!(!within(r, 30, 12), "one past the right edge is outside");
+        assert!(!within(r, 29, 13), "one past the bottom is outside");
+        assert!(
+            !within(Rect::new(0, 0, 0, 0), 0, 0),
+            "an empty rect hits nothing"
+        );
+    }
+
+    #[test]
+    fn a_click_maps_to_the_row_under_it_ignoring_borders() {
+        let r = Rect::new(0, 0, 20, 6);
+        assert_eq!(row_index(r, 0), None, "top border");
+        assert_eq!(row_index(r, 1), Some(0), "first content row");
+        assert_eq!(row_index(r, 4), Some(3), "last content row");
+        assert_eq!(row_index(r, 5), None, "bottom border");
+    }
+
+    #[test]
+    fn clicking_an_item_selects_it() {
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] one\n- [ ] two\n- [ ] three\n");
+        with_layout(&mut app);
+        let items = app.layout.items;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            items.y + 3,
+        ));
+        assert_eq!(app.focus, Focus::Items);
+        assert_eq!(app.item_cursor, 2, "third content row");
+        assert_eq!(app.selected_item().unwrap().text, "three");
+    }
+
+    #[test]
+    fn clicking_a_group_selects_it_and_resets_the_item_cursor() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        app.item_cursor = 1;
+        let groups = app.layout.groups;
+
+        // Row 0 is the synthetic "all"; row 1 is the first real group.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            groups.x + 3,
+            groups.y + 2,
+        ));
+        assert_eq!(app.focus, Focus::Groups);
+        assert_eq!(app.selected_group().unwrap().name, "lefv");
+        assert_eq!(app.item_cursor, 0);
+    }
+
+    #[test]
+    fn clicking_past_the_last_row_selects_nothing() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let items = app.layout.items;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            items.y + 10,
+        ));
+        assert_eq!(app.item_cursor, 0, "empty space below the list is inert");
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_pane_it_is_over() {
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] one\n- [ ] two\n- [ ] three\n");
+        with_layout(&mut app);
+        let items = app.layout.items;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, items.x + 5, items.y + 2));
+        assert_eq!(app.item_cursor, 1);
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, items.x + 5, items.y + 2));
+        assert_eq!(app.item_cursor, 0);
+    }
+
+    #[test]
+    fn scrolling_does_not_steal_focus() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        app.focus = Focus::Groups;
+        let items = app.layout.items;
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, items.x + 5, items.y + 2));
+        assert_eq!(app.focus, Focus::Groups, "reading is not selecting");
+    }
+
+    #[test]
+    fn the_wheel_outside_any_pane_does_nothing() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let before = app.item_cursor;
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 0, 0)); // top bar
+        assert_eq!(app.item_cursor, before);
+    }
+
+    #[test]
+    fn dragging_the_divider_resizes_the_split() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let items = app.layout.items;
+        let divider = items.y + items.height - 1;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            divider,
+        ));
+        assert!(app.dragging_divider);
+        assert_eq!(app.item_cursor, 0, "grabbing the divider is not a click");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            items.x + 5,
+            divider + 4,
+        ));
+        assert_eq!(app.items_height, Some(items.height + 4));
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            items.x + 5,
+            divider + 4,
+        ));
+        assert!(!app.dragging_divider);
+    }
+
+    #[test]
+    fn the_divider_cannot_be_dragged_to_collapse_a_pane() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let items = app.layout.items;
+        app.dragging_divider = true;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            items.x + 5,
+            0,
+        ));
+        assert!(app.items_height.unwrap() >= 3, "items pane stays usable");
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            items.x + 5,
+            200,
+        ));
+        let bottom = app.layout.detail.y + app.layout.detail.height;
+        assert!(
+            items.y + app.items_height.unwrap() <= bottom - 3,
+            "detail pane stays usable"
+        );
+    }
+
+    #[test]
+    fn the_mouse_is_ignored_while_a_modal_is_open() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        press(&mut app, KeyCode::Char('?')); // opens the help modal
+        let items = app.layout.items;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            items.y + 2,
+        ));
+        assert_eq!(app.mode, Mode::Modal, "the click did not fall through");
+        assert_eq!(app.item_cursor, 0);
     }
 
     #[test]

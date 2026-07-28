@@ -15,7 +15,6 @@ use std::path::Path;
 
 use clap::Parser;
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::task::spawn_blocking;
 
 use crate::cli::{CliArgs, Command};
 use crate::messages::Message;
@@ -166,11 +165,17 @@ async fn run_tui(config_path: &Path, query: Option<&str>) -> Result<()> {
         .map(|g| g.todo_file.clone())
         .collect();
     let watch_sender = message_sender.clone();
-    let _watch_handle = spawn_blocking(move || {
-        store::watch::watch_blocking(&watch_root, watched_files, || {
-            watch_sender
-                .send(Message::Event(messages::Event::WorkspaceReloaded))
-                .is_ok()
+    // A plain thread, not spawn_blocking: tokio waits for blocking tasks at
+    // shutdown, and this one outlives the UI by design.
+    std::thread::spawn(move || {
+        store::watch::watch_blocking(&watch_root, watched_files, |changed| {
+            if changed {
+                watch_sender
+                    .send(Message::Event(messages::Event::WorkspaceReloaded))
+                    .is_ok()
+            } else {
+                !watch_sender.is_closed()
+            }
         });
     });
 
@@ -190,14 +195,22 @@ async fn run_tui(config_path: &Path, query: Option<&str>) -> Result<()> {
         }
     });
 
-    // Terminal polling blocks, so it runs off the async runtime.
-    let _input_handle = spawn_blocking(move || {
+    // Terminal polling blocks; a plain thread keeps it clear of tokio's
+    // shutdown, which waits for blocking tasks to return.
+    std::thread::spawn(move || {
         if let Err(err) = input::input_reader(message_sender) {
             error!("input reader stopped: {err}");
         }
     });
 
     let terminal = ratatui::init();
+    // Mouse capture takes the terminal's own selection and scrollback away, so
+    // it is a config switch rather than an assumption.
+    let mouse = config.ui.mouse;
+    if mouse {
+        use ratatui::crossterm::event::EnableMouseCapture;
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture);
+    }
     let mut app = ui::App::new(workspace, config)
         .with_sender(app_sender)
         .with_config_path(config_path);
@@ -206,6 +219,10 @@ async fn run_tui(config_path: &Path, query: Option<&str>) -> Result<()> {
             .map_err(|err| eyre!("bad query: {err}"))?;
     }
     let result = app.run(message_receiver, terminal).await;
+    if mouse {
+        use ratatui::crossterm::event::DisableMouseCapture;
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
     ratatui::restore();
 
     result

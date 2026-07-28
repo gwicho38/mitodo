@@ -138,6 +138,11 @@ entirely.
 | `p` | pause the ticker | `+` `-` | ticker speed |
 | `?` | help | `q` | quit |
 
+Mouse works too: click to select a row, wheel to scroll the pane under the
+pointer, and drag the divider between the item list and the detail pane to
+resize them. Set `ui.mouse = false` to hand selection and scrollback back to
+your terminal.
+
 ## Queries
 
 ```
