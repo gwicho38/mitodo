@@ -2,19 +2,13 @@
 /.direnv/
 /.worktrees/
 
-
-# Added by cargo
-#
-# already existing elements were commented out
-
-#/target
-
-
-# Added by cargo
-#
-# already existing elements were commented out
-
-#/target
+# ============================================
+# Agent, editor and OS local state
+# ============================================
+.claude/settings.local.json
+.DS_Store
+.vscode/settings.json
+.idea/
 
 # ============================================
 # Secrets & Environment (managed by LSH)
@@ -35,9 +29,3 @@
 *-firebase-adminsdk-*.json
 service-account-key.json
 firebase-service-account*.json
-
-# IDE and OS
-.DS_Store
-.vscode/settings.json
-.idea/
-
