@@ -1,24 +1,15 @@
-use crate::prelude::*;
-use log::info;
-use tui_logger::{
-    TuiLoggerFile, TuiLoggerLevelOutput, init_logger, set_default_level, set_log_file,
-};
+use std::path::Path;
 
-pub fn init_logging(cli_args: &CliArgs) -> color_eyre::Result<()> {
-    init_logger(log::LevelFilter::Trace)?;
+use log::LevelFilter;
 
-    set_default_level(cli_args.log_level().unwrap_or(log::LevelFilter::Info));
-
-    if let Some(log_file) = cli_args.log_file() {
-        let file_options = TuiLoggerFile::new(log_file)
-            .output_level(Some(TuiLoggerLevelOutput::Abbreviated))
-            .output_file(false)
-            .output_separator(':');
-        set_log_file(file_options);
-        info!("logging to file {}", log_file);
+pub fn init(log_file: Option<&Path>, level: Option<LevelFilter>) {
+    let level = level.unwrap_or(LevelFilter::Warn);
+    let mut builder = env_logger::Builder::new();
+    builder.filter_level(level);
+    if let Some(path) = log_file
+        && let Ok(file) = std::fs::File::create(path)
+    {
+        builder.target(env_logger::Target::Pipe(Box::new(file)));
     }
-
-    info!("initialized logging");
-
-    Ok(())
+    let _ = builder.try_init();
 }
