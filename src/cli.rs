@@ -5,7 +5,11 @@ use getset::Getters;
 use log::LevelFilter;
 
 #[derive(Parser, Debug, Getters)]
-#[command(name = "mitodo", version, about = "a TUI todo tracker over plain markdown checklists")]
+#[command(
+    name = "mitodo",
+    version,
+    about = "a TUI todo tracker over plain markdown checklists"
+)]
 #[getset(get = "pub")]
 pub struct CliArgs {
     /// Log file (must be writable)

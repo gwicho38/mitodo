@@ -206,3 +206,6 @@ todo_glob = "TODO.md"
         assert!(!cfg.workspace.root.to_string_lossy().starts_with('~'));
     }
 }
+
+pub mod theme;
+pub use theme::Theme;

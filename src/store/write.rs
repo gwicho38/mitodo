@@ -12,7 +12,11 @@ pub enum WriteError {
         found: String,
     },
     #[error("line {line} is past the end of {file} ({len} lines)")]
-    LineOutOfRange { file: String, line: usize, len: usize },
+    LineOutOfRange {
+        file: String,
+        line: usize,
+        len: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +87,7 @@ fn write_lines(
 /// Fetch a line, verifying it still holds what the caller parsed.
 ///
 /// This is the guard that makes concurrent editing by other tools safe.
-fn verify(
-    path: &Path,
-    lines: &[String],
-    line: usize,
-    expected: &str,
-) -> Result<(), WriteError> {
+fn verify(path: &Path, lines: &[String], line: usize, expected: &str) -> Result<(), WriteError> {
     let found = lines.get(line).ok_or_else(|| WriteError::LineOutOfRange {
         file: path.display().to_string(),
         line,
@@ -243,14 +242,20 @@ mod tests {
     fn marks_an_item_done() {
         let (_d, path) = write_temp(DOC);
         toggle(&path, 2, "- [ ] first", true).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\n\n- [x] first\n- [x] second\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\n\n- [x] first\n- [x] second\n"
+        );
     }
 
     #[test]
     fn marks_an_item_not_done() {
         let (_d, path) = write_temp(DOC);
         toggle(&path, 3, "- [x] second", false).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\n\n- [ ] first\n- [ ] second\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\n\n- [ ] first\n- [ ] second\n"
+        );
     }
 
     #[test]
@@ -274,7 +279,10 @@ mod tests {
     fn preserves_crlf_line_endings() {
         let (_d, path) = write_temp("## P0\r\n\r\n- [ ] first\r\n");
         toggle(&path, 2, "- [ ] first", true).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\r\n\r\n- [x] first\r\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\r\n\r\n- [x] first\r\n"
+        );
     }
 
     #[test]
@@ -313,7 +321,10 @@ mod tests {
     fn preserves_indentation_of_nested_items() {
         let (_d, path) = write_temp("- [ ] parent\n  - [ ] child\n");
         toggle(&path, 1, "  - [ ] child", true).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "- [ ] parent\n  - [x] child\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "- [ ] parent\n  - [x] child\n"
+        );
     }
 
     #[test]
@@ -330,7 +341,10 @@ mod tests {
     fn edits_preserve_indentation() {
         let (_d, path) = write_temp("- [ ] parent\n  - [ ] child\n");
         edit_text(&path, 1, "  - [ ] child", "renamed").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "- [ ] parent\n  - [ ] renamed\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "- [ ] parent\n  - [ ] renamed\n"
+        );
     }
 
     #[test]
@@ -374,14 +388,20 @@ mod tests {
     fn deletes_an_item() {
         let (_d, path) = write_temp(DOC);
         delete_item(&path, 2, "- [ ] first").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\n\n- [x] second\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\n\n- [x] second\n"
+        );
     }
 
     #[test]
     fn deleting_takes_the_description_block_with_it() {
         let (_d, path) = write_temp(NESTED);
         delete_item(&path, 2, "- [ ] parent").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\n\n- [x] sibling\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\n\n- [x] sibling\n"
+        );
     }
 
     #[test]
@@ -408,7 +428,10 @@ mod tests {
     fn an_empty_description_removes_the_block() {
         let (_d, path) = write_temp(NESTED);
         set_description(&path, 2, "- [ ] parent", "").unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "## P0\n\n- [ ] parent\n- [x] sibling\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0\n\n- [ ] parent\n- [x] sibling\n"
+        );
     }
 
     #[test]

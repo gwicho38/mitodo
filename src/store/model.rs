@@ -121,7 +121,10 @@ mod tests {
 
     #[test]
     fn priority_parses_from_section_heading() {
-        assert_eq!(Priority::from_heading("P0 — Critical / Time-Sensitive"), Priority::P0);
+        assert_eq!(
+            Priority::from_heading("P0 — Critical / Time-Sensitive"),
+            Priority::P0
+        );
         assert_eq!(Priority::from_heading("P1 — High Priority"), Priority::P1);
         assert_eq!(Priority::from_heading("P3 — Someday"), Priority::P3);
         assert_eq!(Priority::from_heading("Notes"), Priority::None);
@@ -138,7 +141,13 @@ mod tests {
     #[test]
     fn item_id_changes_when_text_changes() {
         let a = ItemId::compute("lefv/TODO.md", "P0", "Prefecture", 0, "Check convocation");
-        let b = ItemId::compute("lefv/TODO.md", "P0", "Prefecture", 0, "Check convocation now");
+        let b = ItemId::compute(
+            "lefv/TODO.md",
+            "P0",
+            "Prefecture",
+            0,
+            "Check convocation now",
+        );
         assert_ne!(a, b);
     }
 

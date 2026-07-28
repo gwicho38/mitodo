@@ -7,10 +7,8 @@ use super::model::{Item, ItemId, Priority};
 
 static CHECKBOX_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\s*)- \[([ xX])\] (.+)$").expect("valid checkbox regex"));
-static HEADING2_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^## (.+)$").expect("valid h2 regex"));
-static HEADING3_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^### (.+)$").expect("valid h3 regex"));
+static HEADING2_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^## (.+)$").expect("valid h2 regex"));
+static HEADING3_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^### (.+)$").expect("valid h3 regex"));
 static DESC_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s+>\s?(.*)$").expect("valid description regex"));
 

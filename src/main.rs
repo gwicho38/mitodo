@@ -1,17 +1,24 @@
 mod cli;
 mod config;
+mod input;
 mod logging;
+mod messages;
 mod prelude;
 mod store;
+mod ui;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::Parser;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::task::spawn_blocking;
 
 use crate::cli::{CliArgs, Command};
+use crate::messages::Message;
 use crate::prelude::*;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     color_eyre::install()?;
     let args = CliArgs::parse();
     logging::init(args.log_file().as_deref(), *args.log_level());
@@ -24,11 +31,11 @@ fn main() -> Result<()> {
     match args.command() {
         Some(Command::Init { root, force }) => cmd_init(root, *force, &config_path),
         Some(Command::List) => cmd_list(&config_path),
-        None => Err(eyre!("no subcommand given; try `mitodo --help`")),
+        None => run_tui(&config_path).await,
     }
 }
 
-fn cmd_init(root: &PathBuf, force: bool, config_path: &Path) -> Result<()> {
+fn cmd_init(root: &Path, force: bool, config_path: &Path) -> Result<()> {
     if config_path.exists() && !force {
         return Err(eyre!(
             "{} already exists; pass --force to overwrite",
@@ -70,4 +77,31 @@ fn cmd_list(config_path: &Path) -> Result<()> {
         workspace.groups.len()
     );
     Ok(())
+}
+
+async fn run_tui(config_path: &Path) -> Result<()> {
+    let config = config::Config::load(config_path)
+        .map_err(|e| eyre!("{e}\n\nrun `mitodo init <workspace>` first to create a config file"))?;
+    let workspace = store::Workspace::load(&config)?;
+    info!(
+        "loaded {} items across {} groups",
+        workspace.items.len(),
+        workspace.groups.len()
+    );
+
+    let (message_sender, message_receiver) = unbounded_channel::<Message>();
+
+    // Terminal polling blocks, so it runs off the async runtime.
+    let _input_handle = spawn_blocking(move || {
+        if let Err(err) = input::input_reader(message_sender) {
+            error!("input reader stopped: {err}");
+        }
+    });
+
+    let terminal = ratatui::init();
+    let app = ui::App::new(workspace);
+    let result = app.run(message_receiver, terminal).await;
+    ratatui::restore();
+
+    result
 }

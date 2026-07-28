@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use crate::config::{
-    Config, GitConfig, GroupBy, PriorityConfig, PrioritySource, WorkspaceConfig,
-};
+use crate::config::{Config, GitConfig, GroupBy, PriorityConfig, PrioritySource, WorkspaceConfig};
 
 use super::model::Priority;
 
@@ -57,7 +55,10 @@ pub fn detect(root: &Path) -> Result<Detection, DetectError> {
 
     // Sample every discovered todo file's section headings.
     let sample_files: Vec<std::path::PathBuf> = if group_by == GroupBy::Directory {
-        group_dirs.iter().map(|g| root.join(g).join("TODO.md")).collect()
+        group_dirs
+            .iter()
+            .map(|g| root.join(g).join("TODO.md"))
+            .collect()
     } else {
         vec![root_todo.clone()]
     };
@@ -181,8 +182,14 @@ mod tests {
     fn detects_sidecars() {
         let dir = dir_workspace();
         let found = detect(dir.path()).unwrap();
-        assert_eq!(found.config.workspace.notes_glob.as_deref(), Some("*/notes.md"));
-        assert_eq!(found.config.workspace.archive_dir.as_deref(), Some("_archive"));
+        assert_eq!(
+            found.config.workspace.notes_glob.as_deref(),
+            Some("*/notes.md")
+        );
+        assert_eq!(
+            found.config.workspace.archive_dir.as_deref(),
+            Some("_archive")
+        );
     }
 
     #[test]
