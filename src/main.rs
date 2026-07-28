@@ -198,7 +198,9 @@ async fn run_tui(config_path: &Path, query: Option<&str>) -> Result<()> {
     });
 
     let terminal = ratatui::init();
-    let mut app = ui::App::new(workspace, config).with_sender(app_sender);
+    let mut app = ui::App::new(workspace, config)
+        .with_sender(app_sender)
+        .with_config_path(config_path);
     if let Some(text) = query {
         app.set_query(text)
             .map_err(|err| eyre!("bad query: {err}"))?;

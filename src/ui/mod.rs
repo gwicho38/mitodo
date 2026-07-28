@@ -17,7 +17,7 @@ use crate::store::Workspace;
 use crate::store::model::{Group, Item};
 use crate::store::{self, WriteError};
 use chyron::TickerState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Which pane takes keyboard input.
@@ -101,19 +101,24 @@ pub struct App {
     pub ticker: Option<TickerState>,
     sender: Option<UnboundedSender<Msg>>,
     config: Config,
+    /// Where to write remembered view state on exit.
+    config_path: Option<PathBuf>,
     should_quit: bool,
 }
 
 impl App {
     pub fn new(workspace: Workspace, config: Config) -> Self {
+        let hide_done = config.ui.hide_done;
+        let ticker = config.ui.ticker.then(|| TickerState::new(2));
         Self {
             workspace,
             config,
+            config_path: None,
             theme: Theme::default(),
             focus: Focus::Items,
             group_cursor: 0,
             item_cursor: 0,
-            hide_done: false,
+            hide_done,
             mode: Mode::Normal,
             query_input: String::new(),
             query: None,
@@ -123,9 +128,41 @@ impl App {
             modal: None,
             pending: None,
             busy: None,
-            ticker: None,
+            ticker,
             sender: None,
             should_quit: false,
+        }
+    }
+
+    /// Remember where the config lives so view state can be written on exit.
+    pub fn with_config_path(mut self, path: &Path) -> Self {
+        self.config_path = Some(path.to_path_buf());
+        // The ticker needs filling once the workspace is known.
+        if let Some(mut ticker) = self.ticker.take() {
+            self.refill_ticker(&mut ticker);
+            self.ticker = Some(ticker);
+        }
+        self
+    }
+
+    /// Write remembered view state back to the config file.
+    ///
+    /// Only touched when something actually changed, so a config the user is
+    /// editing by hand is left alone during an ordinary session.
+    fn persist_ui_state(&mut self) {
+        let Some(path) = self.config_path.clone() else {
+            return;
+        };
+        let current = crate::config::UiConfig {
+            hide_done: self.hide_done,
+            ticker: self.ticker.is_some(),
+        };
+        if current == self.config.ui {
+            return;
+        }
+        self.config.ui = current;
+        if let Err(err) = self.config.save(&path) {
+            warn!("could not save view state: {err}");
         }
     }
 
@@ -192,6 +229,7 @@ impl App {
             self.handle(message);
             if self.should_quit {
                 info!("quit requested");
+                self.persist_ui_state();
                 break;
             }
             terminal.draw(|frame| view::render(&self, frame))?;
@@ -1284,6 +1322,51 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn hide_done_is_seeded_from_the_config() {
+        let (dir, _app) = disk_app(DOC);
+        drop(dir);
+
+        let (_d, mut app) = disk_app(DOC);
+        app.config.ui.hide_done = true;
+        let seeded = App::new(app.workspace.clone(), app.config.clone());
+        assert!(seeded.hide_done, "remembered from last session");
+        assert_eq!(seeded.visible_items().len(), 1);
+    }
+
+    #[test]
+    fn view_state_is_written_back_on_quit() {
+        let (dir, mut app) = disk_app(DOC);
+        let config_path = dir.path().join("config.toml");
+        app.config.save(&config_path).unwrap();
+        app = app.with_config_path(&config_path);
+
+        press(&mut app, KeyCode::Char('h')); // hide done
+        press(&mut app, KeyCode::Char('c')); // ticker on
+        app.persist_ui_state();
+
+        let reloaded = Config::load(&config_path).unwrap();
+        assert!(reloaded.ui.hide_done, "hide_done remembered");
+        assert!(reloaded.ui.ticker, "ticker remembered");
+    }
+
+    #[test]
+    fn an_unchanged_view_leaves_the_config_file_untouched() {
+        let (dir, mut app) = disk_app(DOC);
+        let config_path = dir.path().join("config.toml");
+        app.config.save(&config_path).unwrap();
+        let before = std::fs::read_to_string(&config_path).unwrap();
+
+        app = app.with_config_path(&config_path);
+        app.persist_ui_state();
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            before,
+            "a config being hand-edited is not rewritten for nothing"
         );
     }
 

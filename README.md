@@ -102,7 +102,8 @@ A group can also carry a `notes.md` beside its `TODO.md`; `N` reads it.
 | `/` | edit query | `d` | delete (asks first) |
 | `esc` | clear query | `h` | hide done |
 | `s` | git sync | `c` | scrolling ticker |
-| `N` | read group notes | `p` | pause the ticker |
+| `N` | read group notes | `X` | archive finished items |
+| `p` | pause the ticker | `+` `-` | ticker speed |
 | `?` | help | `q` | quit |
 
 ## Queries
@@ -208,6 +209,20 @@ sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"], ["pull", "--rebase"]
 
 `s` runs the `git.sync` command list in the workspace and shows you the output.
 The list is yours to change; set `enabled = false` to remove the key.
+
+`hide_done` and the ticker are remembered between runs in a `[ui]` section,
+written on exit only when they actually changed.
+
+## Archiving
+
+`X` moves finished items out of the working file into `<archive_dir>/TODO.md`
+under a dated heading. It is a move, not a delete — the lines are appended
+verbatim before being removed, so nothing is lost and anything can be pasted
+back.
+
+An item whose sub-items are not all finished is left alone and reported, since
+archiving it would hide open work. Descriptions and fully-finished subtrees
+travel with their item.
 
 ## Credits
 

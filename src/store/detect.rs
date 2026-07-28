@@ -143,6 +143,7 @@ pub fn detect(root: &Path) -> Result<Detection, DetectError> {
             priority,
             git,
             agent: Default::default(),
+            ui: Default::default(),
         },
         notes,
     })

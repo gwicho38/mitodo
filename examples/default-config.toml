@@ -44,6 +44,13 @@ sync = [
     ["push"],
 ]
 
+[ui]
+# View state mitodo remembers between runs. Written on exit, and only when
+# something actually changed, so a config you are editing by hand is left
+# alone during an ordinary session.
+hide_done = false
+ticker    = false
+
 # --------------------------------------------------------------------------
 # Optional: an external agent.
 #

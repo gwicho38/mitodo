@@ -30,6 +30,17 @@ pub struct Config {
     /// leave an empty section that a later append would duplicate.
     #[serde(default, skip_serializing_if = "AgentConfig::is_disabled")]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// View state that survives a restart, the way `mcli todos` remembered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub hide_done: bool,
+    #[serde(default)]
+    pub ticker: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -170,6 +181,22 @@ pattern = "^P([0-3])"
 enabled = true
 sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"]]
 "#;
+
+    #[test]
+    fn ui_state_defaults_to_off_and_round_trips() {
+        let cfg: Config = toml::from_str(SAMPLE).unwrap();
+        assert!(!cfg.ui.hide_done);
+        assert!(!cfg.ui.ticker);
+
+        let with_ui = format!("{SAMPLE}\n[ui]\nhide_done = true\nticker = true\n");
+        let cfg: Config = toml::from_str(&with_ui).unwrap();
+        assert!(cfg.ui.hide_done);
+        assert!(cfg.ui.ticker);
+
+        let rendered = toml::to_string_pretty(&cfg).unwrap();
+        let again: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(cfg.ui, again.ui);
+    }
 
     #[test]
     fn an_unconfigured_agent_is_not_written_out() {
