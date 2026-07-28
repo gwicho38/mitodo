@@ -4,12 +4,14 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::config::Config;
 use crate::config::Theme;
 use crate::messages::{Event, Message};
 use crate::prelude::*;
 use crate::query::Query;
 use crate::store::Workspace;
 use crate::store::model::{Group, Item};
+use crate::store::{self, WriteError};
 
 /// Which pane takes keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,30 @@ pub enum Mode {
     Normal,
     /// Typing into the query line.
     EditingQuery,
+    /// Typing replacement or new text for an item.
+    Editing(EditKind),
+    /// Waiting for y/n on a destructive action.
+    ConfirmingDelete,
+}
+
+/// What the text currently being typed will become.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditKind {
+    AddSibling,
+    AddChild,
+    EditText,
+    Description,
+}
+
+impl EditKind {
+    fn prompt(self) -> &'static str {
+        match self {
+            EditKind::AddSibling => "new item",
+            EditKind::AddChild => "new sub-item",
+            EditKind::EditText => "edit",
+            EditKind::Description => "description",
+        }
+    }
 }
 
 /// The running application.
@@ -46,13 +72,19 @@ pub struct App {
     pub query: Option<Query>,
     /// Parse failure from the last attempted query, shown in the status bar.
     pub query_error: Option<String>,
+    /// Text being typed for an item edit.
+    pub edit_buffer: String,
+    /// Outcome of the last write, shown in the status bar.
+    pub notice: Option<String>,
+    config: Config,
     should_quit: bool,
 }
 
 impl App {
-    pub fn new(workspace: Workspace) -> Self {
+    pub fn new(workspace: Workspace, config: Config) -> Self {
         Self {
             workspace,
+            config,
             theme: Theme::default(),
             focus: Focus::Items,
             group_cursor: 0,
@@ -62,6 +94,8 @@ impl App {
             query_input: String::new(),
             query: None,
             query_error: None,
+            edit_buffer: String::new(),
+            notice: None,
             should_quit: false,
         }
     }
@@ -129,6 +163,35 @@ impl App {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::EditingQuery => self.handle_query_key(key),
+            Mode::Editing(kind) => self.handle_edit_key(key, kind),
+            Mode::ConfirmingDelete => self.handle_confirm_key(key),
+        }
+    }
+
+    fn handle_edit_key(&mut self, key: KeyEvent, kind: EditKind) {
+        use KeyCode as K;
+        match key.code {
+            K::Esc => {
+                self.mode = Mode::Normal;
+                self.edit_buffer.clear();
+            }
+            K::Enter => self.commit_edit(kind),
+            K::Backspace => {
+                self.edit_buffer.pop();
+            }
+            K::Char(c) => self.edit_buffer.push(c),
+            _ => {}
+        }
+    }
+
+    fn handle_confirm_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        match key.code {
+            K::Char('y') | K::Char('Y') => {
+                self.mode = Mode::Normal;
+                self.delete_selected();
+            }
+            _ => self.mode = Mode::Normal,
         }
     }
 
@@ -187,6 +250,17 @@ impl App {
             (K::BackTab, _) | (K::Left, _) => self.focus = Focus::Groups,
 
             (K::Char('h'), KeyModifiers::NONE) => self.toggle_hide_done(),
+
+            (K::Char(' '), _) | (K::Char('x'), KeyModifiers::NONE) => self.toggle_selected(),
+            (K::Char('a'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
+            (K::Char('A'), KeyModifiers::SHIFT) => self.begin_edit(EditKind::AddChild, false),
+            (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
+            (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
+            (K::Char('d'), KeyModifiers::NONE) => {
+                if self.selected_item().is_some() {
+                    self.mode = Mode::ConfirmingDelete;
+                }
+            }
             _ => {}
         }
     }
@@ -235,6 +309,104 @@ impl App {
         }
     }
 
+    /// Open the text editor, optionally seeded with the item's current value.
+    fn begin_edit(&mut self, kind: EditKind, seed_from_item: bool) {
+        let Some(item) = self.selected_item() else {
+            // Adding to an empty list has no anchor line to insert after.
+            self.notice = Some("no item selected".to_string());
+            return;
+        };
+        self.edit_buffer = if seed_from_item {
+            match kind {
+                EditKind::EditText => item.text.clone(),
+                EditKind::Description => item.description.clone(),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        self.mode = Mode::Editing(kind);
+    }
+
+    fn commit_edit(&mut self, kind: EditKind) {
+        let Some(item) = self.selected_item() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        // Copy what the write needs before borrowing self mutably.
+        let (file, line, raw, indent) =
+            (item.file.clone(), item.line, item.raw.clone(), item.indent);
+        let text = self.edit_buffer.clone();
+
+        let result = match kind {
+            EditKind::AddSibling => store::add_item(&file, line, &raw, indent, &text),
+            EditKind::AddChild => store::add_item(&file, line, &raw, indent + 2, &text),
+            EditKind::EditText => store::edit_text(&file, line, &raw, &text),
+            EditKind::Description => store::set_description(&file, line, &raw, &text),
+        };
+
+        self.mode = Mode::Normal;
+        self.edit_buffer.clear();
+        self.after_write(result, kind.prompt());
+    }
+
+    fn toggle_selected(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let (file, line, raw, done) = (item.file.clone(), item.line, item.raw.clone(), item.done);
+        let result = store::toggle(&file, line, &raw, !done);
+        self.after_write(result, "toggle");
+    }
+
+    fn delete_selected(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let (file, line, raw) = (item.file.clone(), item.line, item.raw.clone());
+        let result = store::delete_item(&file, line, &raw);
+        self.after_write(result, "delete");
+    }
+
+    /// Report the outcome and re-read the workspace.
+    ///
+    /// A `Conflict` means another writer changed the line first; reloading is
+    /// both the recovery and the way the user sees what actually happened.
+    fn after_write(&mut self, result: Result<(), WriteError>, what: &str) {
+        match result {
+            Ok(()) => {
+                self.notice = None;
+                self.reload();
+            }
+            Err(WriteError::Conflict { .. }) => {
+                self.notice = Some(format!("{what} failed: file changed on disk, reloaded"));
+                self.reload();
+            }
+            Err(err) => self.notice = Some(format!("{what} failed: {err}")),
+        }
+    }
+
+    /// Re-read the workspace from disk, keeping the cursor on the same item
+    /// where possible. Item ids are content hashes, so an edit deliberately
+    /// moves the cursor to whatever now occupies the row.
+    pub fn reload(&mut self) {
+        let previous = self.selected_item().map(|i| i.id.clone());
+        match Workspace::load(&self.config) {
+            Ok(workspace) => self.workspace = workspace,
+            Err(err) => {
+                self.notice = Some(format!("reload failed: {err}"));
+                return;
+            }
+        }
+        if let Some(id) = previous
+            && let Some(index) = self.visible_items().iter().position(|i| i.id == id)
+        {
+            self.item_cursor = index;
+        }
+        let len = self.visible_items().len();
+        self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+    }
+
     fn clear_query(&mut self) {
         self.query = None;
         self.query_input.clear();
@@ -267,6 +439,7 @@ pub fn viewport_start(cursor: usize, len: usize, height: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::store::model::{ItemId, Priority};
     use std::path::PathBuf;
 
@@ -278,6 +451,7 @@ mod tests {
             indent: 0,
             done,
             text: text.to_string(),
+            raw: format!("- [{}] {}", if done { "x" } else { " " }, text),
             description: String::new(),
             section: "P0".to_string(),
             heading: "H".to_string(),
@@ -297,15 +471,18 @@ mod tests {
     }
 
     fn app() -> App {
-        App::new(Workspace {
-            root: PathBuf::from("/w"),
-            groups: vec![group("a"), group("b")],
-            items: vec![
-                item("a", "a-open", false),
-                item("a", "a-done", true),
-                item("b", "b-open", false),
-            ],
-        })
+        App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![group("a"), group("b")],
+                items: vec![
+                    item("a", "a-open", false),
+                    item("a", "a-done", true),
+                    item("b", "b-open", false),
+                ],
+            },
+            Config::default(),
+        )
     }
 
     fn press(app: &mut App, code: KeyCode) {
@@ -529,9 +706,192 @@ mod tests {
         assert_eq!(app.visible_items()[0].text, "a-open");
     }
 
+    // --- stage D: mutations against a real temp workspace ---
+
+    /// A workspace on disk plus an App pointed at it.
+    fn disk_app(body: &str) -> (tempfile::TempDir, App) {
+        use crate::config::{GroupBy, WorkspaceConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join("lefv");
+        std::fs::create_dir_all(&g).unwrap();
+        std::fs::write(g.join("TODO.md"), body).unwrap();
+
+        let config = Config {
+            workspace: WorkspaceConfig {
+                root: dir.path().to_path_buf(),
+                group_by: GroupBy::Directory,
+                todo_glob: "*/TODO.md".to_string(),
+                notes_glob: None,
+                archive_dir: None,
+            },
+            ..Default::default()
+        };
+        let workspace = Workspace::load(&config).unwrap();
+        let app = App::new(workspace, config);
+        (dir, app)
+    }
+
+    fn file_of(app: &App) -> std::path::PathBuf {
+        app.workspace.groups[0].todo_file.clone()
+    }
+
+    fn read(app: &App) -> String {
+        std::fs::read_to_string(file_of(app)).unwrap()
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    const DOC: &str = "## P0 — Critical\n\n- [ ] alpha\n- [x] beta\n";
+
+    #[test]
+    fn space_toggles_the_selected_item_on_disk() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(read(&app), "## P0 — Critical\n\n- [x] alpha\n- [x] beta\n");
+        assert!(
+            app.workspace.items[0].done,
+            "reloaded state reflects the write"
+        );
+    }
+
+    #[test]
+    fn toggling_twice_returns_the_file_to_its_original_bytes() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(read(&app), DOC);
+    }
+
+    #[test]
+    fn e_edits_the_selected_item_text() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(app.edit_buffer, "alpha", "seeded with the current text");
+        app.edit_buffer.clear();
+        type_text(&mut app, "alpha revised");
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha revised\n- [x] beta\n"
+        );
+    }
+
+    #[test]
+    fn a_adds_a_sibling_below_the_selection() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, "inserted");
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n- [ ] inserted\n- [x] beta\n"
+        );
+    }
+
+    #[test]
+    fn shift_a_adds_an_indented_child() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        type_text(&mut app, "child");
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n  - [ ] child\n- [x] beta\n"
+        );
+    }
+
+    #[test]
+    fn i_sets_the_description() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('i'));
+        type_text(&mut app, "needs CPA sign-off");
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n  > needs CPA sign-off\n- [x] beta\n"
+        );
+        assert_eq!(app.workspace.items[0].description, "needs CPA sign-off");
+    }
+
+    #[test]
+    fn d_asks_before_deleting_and_y_confirms() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.mode, Mode::ConfirmingDelete);
+        assert_eq!(read(&app), DOC, "nothing written before confirmation");
+
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(read(&app), "## P0 — Critical\n\n- [x] beta\n");
+    }
+
+    #[test]
+    fn any_other_key_cancels_the_delete() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('d'));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC, "file untouched");
+    }
+
+    #[test]
+    fn esc_abandons_an_edit_without_writing() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('z'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC);
+    }
+
+    #[test]
+    fn a_concurrent_edit_surfaces_as_a_conflict_and_reloads() {
+        let (_d, mut app) = disk_app(DOC);
+        // Another writer changes the line after mitodo parsed it.
+        std::fs::write(
+            file_of(&app),
+            "## P0 — Critical\n\n- [ ] alpha, amended elsewhere\n- [x] beta\n",
+        )
+        .unwrap();
+
+        press(&mut app, KeyCode::Char(' '));
+
+        let notice = app.notice.as_deref().unwrap_or_default();
+        assert!(
+            notice.contains("changed on disk"),
+            "conflict reported: {notice}"
+        );
+        assert_eq!(
+            app.workspace.items[0].text, "alpha, amended elsewhere",
+            "reloaded to the other writer's version"
+        );
+        assert!(
+            read(&app).contains("- [ ] alpha, amended elsewhere"),
+            "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn normal_keys_do_not_act_while_typing_an_edit() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.should_quit, "q is text while editing");
+    }
+
+    #[test]
+    fn mutations_on_an_empty_list_are_a_no_op_with_a_notice() {
+        let (_d, mut app) = disk_app("## P0 — Critical\n");
+        assert!(app.selected_item().is_none());
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.mode, Mode::Normal, "no editor opened without an anchor");
+        assert!(app.notice.is_some());
+    }
+
     #[test]
     fn an_empty_workspace_does_not_panic_on_navigation() {
-        let mut app = App::new(Workspace::default());
+        let mut app = App::new(Workspace::default(), Config::default());
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('G'));
         assert_eq!(app.item_cursor, 0);

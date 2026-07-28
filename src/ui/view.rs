@@ -53,7 +53,7 @@ pub fn split(area: Rect, command_line_visible: bool) -> Frames {
 /// Render the whole screen. Kept free of I/O so it can be exercised headlessly
 /// against a `TestBackend`.
 pub fn render(app: &App, frame: &mut Frame) {
-    let editing = app.mode == Mode::EditingQuery;
+    let editing = matches!(app.mode, Mode::EditingQuery | Mode::Editing(_));
     let f = split(frame.area(), editing);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
@@ -67,10 +67,14 @@ pub fn render(app: &App, frame: &mut Frame) {
 
 fn render_command_line(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
+    let (prefix, text) = match app.mode {
+        Mode::Editing(kind) => (format!("{}: ", kind.prompt()), app.edit_buffer.clone()),
+        _ => ("/".to_string(), app.query_input.clone()),
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled("/", theme.command_input()),
-            Span::styled(app.query_input.clone(), theme.command_input()),
+            Span::styled(prefix, theme.command_input()),
+            Span::styled(text, theme.command_input()),
             // A block cursor, since the terminal cursor stays hidden.
             Span::styled("\u{2588}", theme.command_input()),
         ]))
@@ -253,17 +257,24 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
-    let line = match (&app.query_error, app.mode) {
-        (Some(err), _) => Line::from(Span::styled(
+    let line = match (&app.query_error, &app.notice, app.mode) {
+        (Some(err), _, _) => Line::from(Span::styled(
             format!(" query error: {err} "),
             theme.tooltip_error(),
         )),
-        (None, Mode::EditingQuery) => Line::from(Span::styled(
+        (None, Some(notice), _) => {
+            Line::from(Span::styled(format!(" {notice} "), theme.tooltip_warning()))
+        }
+        (None, None, Mode::EditingQuery | Mode::Editing(_)) => Line::from(Span::styled(
             " enter apply · esc cancel ".to_string(),
             theme.statusbar(),
         )),
-        (None, Mode::Normal) => Line::from(Span::styled(
-            " j/k move · tab focus · / query · esc clear · h hide done · q quit ".to_string(),
+        (None, None, Mode::ConfirmingDelete) => Line::from(Span::styled(
+            " delete this item? y / n ".to_string(),
+            theme.tooltip_warning(),
+        )),
+        (None, None, Mode::Normal) => Line::from(Span::styled(
+            " space toggle · a add · e edit · i desc · d del · / query · q quit ".to_string(),
             theme.statusbar(),
         )),
     };
@@ -273,6 +284,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::store::Workspace;
     use crate::store::model::{Group, Item, ItemId, Priority};
     use ratatui::Terminal;
@@ -287,6 +299,7 @@ mod tests {
             indent,
             done,
             text: text.to_string(),
+            raw: format!("- [{}] {}", if done { "x" } else { " " }, text),
             description: String::new(),
             section: "P0 — Critical".to_string(),
             heading: "H".to_string(),
@@ -297,19 +310,22 @@ mod tests {
     }
 
     fn test_app() -> App {
-        App::new(Workspace {
-            root: PathBuf::from("/w"),
-            groups: vec![Group {
-                name: "lefv".to_string(),
-                todo_file: PathBuf::from("/w/lefv/TODO.md"),
-                notes_file: None,
-                archive_dir: None,
-            }],
-            items: vec![
-                item("file the 83(b)", false, 0),
-                item("done thing", true, 0),
-            ],
-        })
+        App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![Group {
+                    name: "lefv".to_string(),
+                    todo_file: PathBuf::from("/w/lefv/TODO.md"),
+                    notes_file: None,
+                    archive_dir: None,
+                }],
+                items: vec![
+                    item("file the 83(b)", false, 0),
+                    item("done thing", true, 0),
+                ],
+            },
+            Config::default(),
+        )
     }
 
     /// Flatten the rendered buffer into one string per row.
@@ -396,7 +412,8 @@ mod tests {
         let rows = draw(80, 24);
         let last = rows.last().unwrap();
         assert!(last.contains("q quit"));
-        assert!(last.contains("tab focus"));
+        assert!(last.contains("space toggle"));
+        assert!(last.contains("/ query"));
     }
 
     #[test]

@@ -75,6 +75,7 @@ pub fn parse_todo_file(path: &Path, file_rel: &str, source: &str) -> Vec<Item> {
                 indent,
                 done,
                 text,
+                raw: (*raw).to_string(),
                 description: String::new(),
                 section: section.clone(),
                 heading: heading.clone(),
@@ -118,6 +119,18 @@ mod tests {
     fn fixture() -> Vec<Item> {
         let source = include_str!("../../tests/fixtures/basic/TODO.md");
         parse_todo_file(Path::new("lefv/TODO.md"), "lefv/TODO.md", source)
+    }
+
+    #[test]
+    fn records_the_raw_line_verbatim() {
+        let source = include_str!("../../tests/fixtures/basic/TODO.md");
+        let lines: Vec<&str> = source.lines().collect();
+        for item in fixture() {
+            assert_eq!(
+                item.raw, lines[item.line],
+                "raw must match the source line byte for byte"
+            );
+        }
     }
 
     #[test]

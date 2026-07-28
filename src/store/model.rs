@@ -95,6 +95,11 @@ pub struct Item {
     pub indent: usize,
     pub done: bool,
     pub text: String,
+    /// The checkbox line exactly as it appears in the file.
+    ///
+    /// Every write verifies this against the file before touching it, so it
+    /// must stay byte-identical to the source rather than reconstructed.
+    pub raw: String,
     /// Blockquote lines directly beneath the item, joined with newlines.
     pub description: String,
     /// The `## ` heading in force above this item.

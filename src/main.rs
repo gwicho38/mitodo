@@ -100,7 +100,7 @@ async fn run_tui(config_path: &Path) -> Result<()> {
     });
 
     let terminal = ratatui::init();
-    let app = ui::App::new(workspace);
+    let app = ui::App::new(workspace, config);
     let result = app.run(message_receiver, terminal).await;
     ratatui::restore();
 

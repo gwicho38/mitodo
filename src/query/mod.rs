@@ -312,6 +312,7 @@ mod tests {
             indent: 0,
             done,
             text: text.to_string(),
+            raw: format!("- [{}] {}", if done { "x" } else { " " }, text),
             description: String::new(),
             section: "P1 — High Priority".to_string(),
             heading: "H".to_string(),
