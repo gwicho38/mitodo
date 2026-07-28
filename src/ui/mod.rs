@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use crate::config::Theme;
 use crate::messages::{Event, Message};
 use crate::prelude::*;
+use crate::query::Query;
 use crate::store::Workspace;
 use crate::store::model::{Group, Item};
 
@@ -15,6 +16,14 @@ use crate::store::model::{Group, Item};
 pub enum Focus {
     Groups,
     Items,
+}
+
+/// What keyboard input currently means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    /// Typing into the query line.
+    EditingQuery,
 }
 
 /// The running application.
@@ -30,6 +39,13 @@ pub struct App {
     pub group_cursor: usize,
     pub item_cursor: usize,
     pub hide_done: bool,
+    pub mode: Mode,
+    /// Text currently being typed into the query line.
+    pub query_input: String,
+    /// The applied query, if any.
+    pub query: Option<Query>,
+    /// Parse failure from the last attempted query, shown in the status bar.
+    pub query_error: Option<String>,
     should_quit: bool,
 }
 
@@ -42,6 +58,10 @@ impl App {
             group_cursor: 0,
             item_cursor: 0,
             hide_done: false,
+            mode: Mode::Normal,
+            query_input: String::new(),
+            query: None,
+            query_error: None,
             should_quit: false,
         }
     }
@@ -63,6 +83,10 @@ impl App {
             .iter()
             .filter(|item| group_file.is_none_or(|f| &item.file == f))
             .filter(|item| !(self.hide_done && item.done))
+            .filter(|item| match &self.query {
+                Some(query) => query.matches(item, self.workspace.group_name_for(item)),
+                None => true,
+            })
             .collect()
     }
 
@@ -102,8 +126,53 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        match self.mode {
+            Mode::Normal => self.handle_normal_key(key),
+            Mode::EditingQuery => self.handle_query_key(key),
+        }
+    }
+
+    /// Keys while typing a query. Enter applies, Esc abandons the edit and
+    /// leaves whatever query was previously applied in place.
+    fn handle_query_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        match key.code {
+            K::Esc => {
+                self.mode = Mode::Normal;
+                self.query_error = None;
+            }
+            K::Enter => self.apply_query(),
+            K::Backspace => {
+                self.query_input.pop();
+            }
+            K::Char(c) => self.query_input.push(c),
+            _ => {}
+        }
+    }
+
+    /// Parse `query_input` and adopt it, or report why it failed.
+    fn apply_query(&mut self) {
+        match Query::parse(&self.query_input) {
+            Ok(query) => {
+                self.query = query;
+                self.query_error = None;
+                self.mode = Mode::Normal;
+                // The list just changed length underneath the cursor.
+                let len = self.visible_items().len();
+                self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+            }
+            Err(err) => self.query_error = Some(err.to_string()),
+        }
+    }
+
+    fn handle_normal_key(&mut self, key: KeyEvent) {
         use KeyCode as K;
         match (key.code, key.modifiers) {
+            (K::Char('/'), KeyModifiers::NONE) => {
+                self.mode = Mode::EditingQuery;
+                self.query_error = None;
+            }
+            (K::Esc, _) => self.clear_query(),
             (K::Char('q'), KeyModifiers::NONE) => self.should_quit = true,
             (K::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
 
@@ -164,6 +233,14 @@ impl App {
                 self.item_cursor = self.visible_items().len().saturating_sub(1);
             }
         }
+    }
+
+    fn clear_query(&mut self) {
+        self.query = None;
+        self.query_input.clear();
+        self.query_error = None;
+        let len = self.visible_items().len();
+        self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
     }
 
     fn toggle_hide_done(&mut self) {
@@ -351,6 +428,105 @@ mod tests {
     fn viewport_handles_degenerate_sizes() {
         assert_eq!(viewport_start(0, 0, 0), 0);
         assert_eq!(viewport_start(5, 3, 0), 0);
+    }
+
+    fn type_query(app: &mut App, text: &str) {
+        press(app, KeyCode::Char('/'));
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn slash_enters_query_mode_and_enter_applies() {
+        let mut app = app();
+        type_query(&mut app, "!done");
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.query.is_some());
+        assert_eq!(app.visible_items().len(), 2, "only open items");
+    }
+
+    #[test]
+    fn query_filters_by_group_name() {
+        let mut app = app();
+        type_query(&mut app, "acct:b");
+        assert_eq!(app.visible_items().len(), 1);
+        assert_eq!(app.visible_items()[0].text, "b-open");
+    }
+
+    #[test]
+    fn a_bad_query_reports_an_error_and_stays_in_edit_mode() {
+        let mut app = app();
+        type_query(&mut app, "bogus:x");
+        assert_eq!(app.mode, Mode::EditingQuery, "stays open to be corrected");
+        assert!(app.query_error.is_some());
+        assert!(app.query.is_none(), "no query applied");
+        assert_eq!(app.visible_items().len(), 3, "list unchanged");
+    }
+
+    #[test]
+    fn esc_abandons_the_edit_without_applying() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('x'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.query.is_none());
+    }
+
+    #[test]
+    fn esc_in_normal_mode_clears_an_applied_query() {
+        let mut app = app();
+        type_query(&mut app, "acct:b");
+        assert_eq!(app.visible_items().len(), 1);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.query.is_none());
+        assert_eq!(app.visible_items().len(), 3);
+    }
+
+    #[test]
+    fn backspace_edits_the_query_buffer() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        for c in "acct:bx".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.visible_items().len(),
+            1,
+            "acct:b applied after backspace"
+        );
+    }
+
+    #[test]
+    fn normal_keys_do_not_act_while_typing_a_query() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(!app.should_quit, "q is text, not quit, while editing");
+        assert_eq!(app.query_input, "q");
+    }
+
+    #[test]
+    fn applying_a_query_clamps_a_now_out_of_range_cursor() {
+        let mut app = app();
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        assert_eq!(app.item_cursor, 2);
+        type_query(&mut app, "acct:b");
+        assert!(app.item_cursor < app.visible_items().len());
+    }
+
+    #[test]
+    fn query_and_group_selection_compose() {
+        let mut app = app();
+        type_query(&mut app, "!done");
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('j')); // group "a"
+        assert_eq!(app.visible_items().len(), 1, "open items in group a only");
+        assert_eq!(app.visible_items()[0].text, "a-open");
     }
 
     #[test]

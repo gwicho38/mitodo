@@ -4,6 +4,7 @@ mod input;
 mod logging;
 mod messages;
 mod prelude;
+mod query;
 mod store;
 mod ui;
 

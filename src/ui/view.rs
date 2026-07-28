@@ -4,7 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
-use super::{App, Focus, viewport_start};
+use super::{App, Focus, Mode, viewport_start};
 
 /// The horizontal bands of the screen, top to bottom.
 ///
@@ -15,15 +15,17 @@ pub struct Frames {
     pub groups: Rect,
     pub items: Rect,
     pub detail: Rect,
+    pub command_line: Rect,
     pub status: Rect,
 }
 
-pub fn split(area: Rect) -> Frames {
-    let [top_bar, middle, status] = Layout::default()
+pub fn split(area: Rect, command_line_visible: bool) -> Frames {
+    let [top_bar, middle, command_line, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(0),
+            Constraint::Length(if command_line_visible { 1 } else { 0 }),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -43,6 +45,7 @@ pub fn split(area: Rect) -> Frames {
         groups,
         items,
         detail,
+        command_line,
         status,
     }
 }
@@ -50,12 +53,30 @@ pub fn split(area: Rect) -> Frames {
 /// Render the whole screen. Kept free of I/O so it can be exercised headlessly
 /// against a `TestBackend`.
 pub fn render(app: &App, frame: &mut Frame) {
-    let f = split(frame.area());
+    let editing = app.mode == Mode::EditingQuery;
+    let f = split(frame.area(), editing);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
     render_items(app, frame, f.items);
     render_detail(app, frame, f.detail);
+    if editing {
+        render_command_line(app, frame, f.command_line);
+    }
     render_status(app, frame, f.status);
+}
+
+fn render_command_line(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("/", theme.command_input()),
+            Span::styled(app.query_input.clone(), theme.command_input()),
+            // A block cursor, since the terminal cursor stays hidden.
+            Span::styled("\u{2588}", theme.command_input()),
+        ]))
+        .style(theme.command_input()),
+        area,
+    );
 }
 
 fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
@@ -76,6 +97,12 @@ fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
     ];
     if app.hide_done {
         spans.push(Span::styled(" !done ", theme.query()));
+    }
+    if !app.query_input.is_empty() && app.query.is_some() {
+        spans.push(Span::styled(
+            format!(" /{} ", app.query_input),
+            theme.query(),
+        ));
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(theme.statusbar()),
@@ -226,14 +253,21 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            " j/k move · tab focus · h hide done · q quit ".to_string(),
+    let line = match (&app.query_error, app.mode) {
+        (Some(err), _) => Line::from(Span::styled(
+            format!(" query error: {err} "),
+            theme.tooltip_error(),
+        )),
+        (None, Mode::EditingQuery) => Line::from(Span::styled(
+            " enter apply · esc cancel ".to_string(),
             theme.statusbar(),
-        )))
-        .style(theme.statusbar()),
-        area,
-    );
+        )),
+        (None, Mode::Normal) => Line::from(Span::styled(
+            " j/k move · tab focus · / query · esc clear · h hide done · q quit ".to_string(),
+            theme.statusbar(),
+        )),
+    };
+    frame.render_widget(Paragraph::new(line).style(theme.statusbar()), area);
 }
 
 #[cfg(test)]

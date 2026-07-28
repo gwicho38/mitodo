@@ -77,6 +77,18 @@ impl Workspace {
     pub fn open_count(&self) -> usize {
         self.items.iter().filter(|i| !i.done).count()
     }
+
+    /// Name of the group an item belongs to, resolved by its source file.
+    ///
+    /// The query language's `acct:` needs this, and `Item` deliberately stores
+    /// a path rather than a group name so the store stays independent of how
+    /// groups happen to be configured.
+    pub fn group_name_for(&self, item: &Item) -> Option<&str> {
+        self.groups
+            .iter()
+            .find(|g| g.todo_file == item.file)
+            .map(|g| g.name.as_str())
+    }
 }
 
 /// One group per subdirectory holding a TODO.md, sorted by name.
