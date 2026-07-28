@@ -1,208 +1,196 @@
-- 📢 Stay up-to-date! Subscribe to the [eilmeldung release atom feed](https://github.com/christo-auer/eilmeldung/releases.atom)! Press `c e` in eilmeldung to automatically add the feed!
-- 🤖 Want to use your **AI/LLM chatbot with eilmeldung** to select and summarize articles? Or do you want eilmeldung to stay clear of all this AI fuzz? Take part in the [survey (demo inside)](https://github.com/christo-auer/eilmeldung/issues/197) and let me know what you think!
+# mitodo
 
+A terminal todo tracker over plain markdown checklists.
 
-![Logo of eilmeldung](docs/images/logo.png) 
-  
+`mitodo` reads a directory of `TODO.md` files, shows them in a three-pane TUI
+with vim keybindings and a query language, and writes changes back to the source
+markdown **without reformatting it**. Your files stay yours: no database, no
+lock-in, no proprietary format. Edit them in your editor, from a script, or with
+`mitodo` — all at the same time.
 
-![Screenshot of eilmeldung](docs/images/hero-shot.png) 
+The name is Spanish — *mi todo*, "my everything" — and happens to contain the
+word "todo".
 
-*eilmeldung* is a *TUI RSS reader* based on the awesome [news-flash](https://gitlab.com/news-flash/news_flash) library.  
-- *fast* in every aspect: non-blocking terminal user interface, (neo)vim-inspired keybindings, instant start-up and no clutter
-- *stands* on the shoulder of *giants*: based on the news-flash library, *eilmeldung* supports many RSS providers, is efficient and reliable
-- *powerful* and yet *easy to use out-of-the-box*: sane defaults which work for most, and yet configurable to meet anyone's requirements, from keybindings to colors, from displayed content to RSS provider
-- read news like a pro: filter and search news with an easy-to-learn powerful *query language*, activate *zen mode* to focus on the article content and nothing else
-
-*eilmeldung* is German for *breaking news*
-
----
-
-## Table of Contents
-
-- [Showreel](#showreel)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Quick Reference](#quick-reference)
-- [Documentation](#documentation)
-- [Alternatives](#alternatives)
-- [FAQ](#faq)
-- [Credits](#credits)
-- [Contributing](#contributing)
-
----
-
-# Showreel
-
-https://github.com/user-attachments/assets/ddd731dd-3fce-43c2-80fd-dafb20520873
-
-This video demonstrates
-- basic (vim-like) navigation and reading
-- *zen* mode: just show content
-- creating new tags and tagging an article
-- *filtering* and *searching* article list by using article queries
-- *tagging* multiple articles by using an article query
-
----
-
-# Installation 
-
-**Quick install:**
-
-- **Homebrew**: `brew tap christo-auer/eilmeldung  https://github.com/christo-auer/eilmeldung && brew install eilmeldung`
-- **Arch (AUR)**: `paru -S eilmeldung` or `yay -S eilmeldung`
-- **Cargo**: `cargo install eilmeldung` (you need to install [build dependencies](docs/installation.md) first!)
-
-**Important**: You need a [Nerd Font](https://github.com/ryanoasis/nerd-fonts) compatible font/terminal for icons to display correctly!
-
-For detailed installation instructions including Nix/Home Manager setup, see **[Installation Guide](docs/installation.md)**.
-
----
-
-# Quick Start
-
-1. **Install** eilmeldung (see above)
-2. **Run** `eilmeldung` - you'll be guided through the initial setup
-3. **Choose a provider** (select "Local" if you're new to RSS)
-4. **Add feeds** with `c f` or import an OPML file with `:importopml path/to/file.opml`
-5. **Sync** your feeds with `s`
-6. **Start reading!** Use `j`/`k` to navigate up/down, `h`/`l` to navigate between panels, `o` to open articles in the browser, `z` to enjoy "zen mode"
-
-Press `?` anytime to see all available commands!
-
-For a comprehensive getting started guide, see **[Getting Started](docs/getting-started.md)**.
-
----
-
-# Quick Reference
-
-Here are some key bindings to get you started.
-
-| Key             | Action                                                        |
-| -----           | --------                                                      |
-| `?`             | Show all key bindings (search with `/`!)                      |
-| `s`             | Sync all feeds                                                |
-| `j` / `k`       | Move down / up                                                |
-| `h` / `l`       | Move between panels (left/right)                              |
-| `o`             | Open article in browser, mark as read, jump to next unread    |
-| `r` / `u`       | Mark as read / unread                                         |
-| `m` / `v`       | Mark (star) / unmark article                                  |
-| `/`             | Search articles                                               |
-| `:`             | Open command line                                             |
-| `q`             | Quit                                                          |
-| `1` / `2` / `3` | Show all/only unread/only marked in feed list or article list |
-
-**Tip:** Press `?` anytime to see all available commands, and use `/` in the help dialog to search!
-
-**Another Tip**: Navigate to the article list and use `C-j`/`C-k` to move down/up in the feed list and use `M-k`/`M-j` to scroll the article content down/up. Of course, you can remap all keys to your liking.
-
----
-
-# Documentation
-
-Complete documentation is available in the `docs/` directory:
-
-- **[Getting Started Guide](docs/getting-started.md)** - Setup and first steps
-- **[Installation Guide](docs/installation.md)** - Detailed installation instructions
-- **[Key Bindings Reference](docs/keybindings.md)** - Complete keybinding reference
-- **[Commands Reference](docs/commands.md)** - All available commands
-- **[Article Queries](docs/queries.md)** - Powerful search and filter syntax
-- **[Configuration Guide](docs/configuration.md)** - Customize appearance and behavior
-- **[Command Line Arguments](docs/cli_args.md)** - Available CLI options
-- **[FAQ](docs/faq.md)** - Frequently asked questions
-
----
-
-# Alternatives
-
-Of course, there are many awesome alternatives to *eilmeldung*. Check them out!
-
-- [newsboat](https://newsboat.org/) is the battle-proven classic
-- [feedr](https://github.com/bahdotsh/feedr) is a feature-rich terminal-based RSS feed reader written in Rust
-- [russ](https://github.com/ckampfe/russ)  is a TUI RSS/Atom reader with vim-like controls and a local-first, offline-first focus.
-- [elfeed](https://github.com/skeeto/elfeed) provides RSS in emacs
-- [tuifeed](https://github.com/veeso/tuifeed), a terminal news feed reader with a fancy ui 
-
----
-
-# FAQ
-
-### Which providers are supported?
-
-See [news_flash_gtk for all supported providers](https://gitlab.com/news-flash/news_flash_gtk). 
-
-### Does eilmeldung support smart folders?
-
-Yes! Use queries in your feed list configuration. Example:
-
-```toml
-feed_list = [
-  'query: "Important Today" #important unread today',
-  'query: "Read Later" #readlater unread',
-  "feeds",
-]
+```
+  mitodo   all · 41 open / 96 shown  /pri:P0 !done
+┌groups──────────────┐┌items 3/41─────────────────────────────────────────────┐
+│  all         41    ││  [x] P0  File the 83(b) election                      │
+│▸ work        12    ││    [ ] P0  pull the signature page                    │
+│  home         9    ││▸ [ ] P0  Respond to opposing counsel re: discovery    │
+│  side         3    │└───────────────────────────────────────────────────────┘
+│                    │┌detail─────────────────────────────────────────────────┐
+│                    ││Respond to opposing counsel re: discovery              │
+│                    ││P0 · P0 — Critical · Discovery                         │
+│                    ││                                                       │
+│                    ││due Friday. Need the exhibit list from Sam first.      │
+└────────────────────┘└───────────────────────────────────────────────────────┘
+ space toggle · a add · e edit · d del · / query · s sync · ? keys · q quit
 ```
 
-### Can I customize keybindings and colors?
+## Why
 
-Absolutely! Everything is customizable via the [configuration file](docs/configuration.md). See `examples/default-config.toml` for all options.
+Markdown checklists are the most portable todo format there is, and every editor
+and agent can already read them. What they lack is a fast way to *work* them:
+filtering, jumping between projects, ticking things off without hunting for the
+line. `mitodo` is that layer, and nothing more.
 
-### How do I save articles for later?
+## Install
 
-Create a tag (`:tagadd readlater red`), bind it to a key, and create a query in your feed list. See the [FAQ](docs/faq.md#how-can-i-save-articles-for-reading-later) for details.
+```sh
+cargo install --path .
+```
 
-### Can I hide feeds/categories/tags without unread/marked articles?
+Requires Rust 1.85+ (edition 2024).
 
-Yes, focus the feed list and press `2` / `3` to show only feeds/categories/tags with unread / marked articles, show all with `1`. Change the value of the configuration option `feed_list_scope` to either `all`, `unread` or `marked` to set the default value.
+## Getting started
 
+Point it at a directory of todo files. It works out the layout and writes a
+config you can read and edit:
 
-### Can I execute automatic operations after synchronisation/refresh?
+```sh
+$ mitodo init ~/notes/todo
+scanning /home/you/notes/todo...
+  ✓ 4 group directories, pattern */TODO.md
+  ✓ priorities from "## " headings (12 matched P0–P3)
+  ✓ _archive/ directories
+  ✓ git repository, sync enabled
+wrote /home/you/.config/mitodo/config.toml
 
-Yes, via the option `after_sync_commands` [configuration](docs/configuration.md#after-sync_commands) for some recipes.
+$ mitodo          # open the TUI
+$ mitodo list     # or just print everything
+```
 
-### Can I select articles and then mark them as read/unread/tag them etc.?
+Detection understands two shapes out of the box:
 
-Yes, you can *flag* them by pressing `f` and then press `r` to mark all flagged articles as read. Similarly for `u`(unread), `m` (mark), `t` (tag), etc. Press `D` to remove all flags.
+| layout | what you get |
+|---|---|
+| `<group>/TODO.md` per subdirectory | one group per directory |
+| a single `TODO.md` at the root | one group per `## ` heading |
 
-Checkout [FAQ](docs/faq.md#features--capabilities)!
+Priorities are read from `## ` headings matching `P0`–`P3` if you use them, and
+simply disabled if you don't.
 
----
+## Keys
 
-**More questions?** See the complete [FAQ](docs/faq.md).
+| | | | |
+|---|---|---|---|
+| `j` `k` | down / up | `space` `x` | toggle done |
+| `g` `G` | first / last | `a` `A` | add sibling / child |
+| `tab` | focus items | `e` | edit text |
+| `shift-tab` | focus groups | `i` | edit description |
+| `/` | edit query | `d` | delete (asks first) |
+| `esc` | clear query | `h` | hide done |
+| `s` | git sync | `c` | scrolling ticker |
+| `?` | help | `q` | quit |
 
----
+## Queries
 
-# Credits
+```
+pri:P0 acct:work !done          urgent, mine, not finished
+sec:"High Priority" has:desc    by section, with notes attached
+(pri:P0 OR pri:P1) AND !done    parentheses and explicit operators
+onehouse                        bare words match text and descriptions
+```
 
-## Standing on the Shoulders of Giants
+| field | matches |
+|---|---|
+| `acct:` `account:` `group:` | the group name |
+| `pri:` `priority:` | `P0`–`P3`, optionally `<=` `>=` `<` `>` |
+| `done` / `!done` | completion |
+| `sec:` `section:` | the `## ` heading, substring |
+| `has:desc` | items with a description block |
+| `text:` | text and description, substring |
 
-*eilmeldung* was inspired by other awesome programs and libraries:
+Adjacent terms are ANDed. `NOT` and a leading `!` both negate.
 
-- [news-flash](https://gitlab.com/news-flash/news_flash) library and [news-flash GTK](https://gitlab.com/news-flash/news_flash_gtk), a modern Gnome/GTK RSS reader, both implemented in rust
-- [newsboat](https://newsboat.org/) which has been my TUI RSS reader of choice for many years
-- [spotify-player](https://github.com/aome510/spotify-player), a TUI spotify music player written in rust. In particular, the theming system and how input is handled has been a great inspiration for *eilmeldung*
-- [vifm](https://vifm.info/), [neomutt](https://neomutt.org/) with [notmuch](https://notmuchmail.org/) inspired the filtering and article query systems
-- [neovim](https://neovim.io/) and [vim](https://www.vim.org/) for their philosophy on user input
-- [ratatui](https://ratatui.rs/) and all its supporting libraries for creating the TUI
+## The file format
 
-## On the use of LLMs in this Project
+Anything markdown already does:
 
-This project was built as an experiment in learning Rust through LLM use. LLMs were used as tutors (asking questions, not providing solutions) and for documentation, but every line of code was intentionally written to solve a problem I understood.
+```markdown
+## P0 — Critical
 
-📖 Read more about the LLM development approach in [LLM Development](docs/llm-development.md).
+### Discovery
 
----
+- [ ] Respond to opposing counsel
+  > due Friday. Need the exhibit list from Sam first.
+  - [ ] pull the exhibit list
+  - [x] confirm the deadline
+```
 
-# Contributing
+Checkbox lines are items, indented ones are children, and indented `>` lines
+beneath an item are its description. Everything else in the file — frontmatter,
+prose, headings, horizontal rules — is left exactly as it was.
 
-Contributions are welcome! Please feel free to:
+## Editing safely alongside other tools
 
-- Report bugs or request features via [GitHub Issues](https://github.com/christo-auer/eilmeldung/issues)
-- Submit pull requests
-- Improve documentation
-- Share your configuration examples
+`mitodo` assumes it is not the only writer. Before changing a line it re-reads
+the file and checks the line still holds what it parsed; if another program got
+there first the write is refused, the workspace reloads, and you see what
+happened. Writes go to a temporary file and are renamed into place, so a crash
+cannot leave a half-written todo list.
 
----
+It also watches the directory, so edits made in your editor or by a script show
+up without a restart.
 
-# License
+The guarantee this rests on: **after any change, every line you did not edit is
+byte-identical to what it was** — including line endings and whether the file
+ends in a newline. That is the property the test suite spends most of its effort
+on.
 
-See [LICENSE](LICENSE) file for details.
+## Optional: an agent
+
+`mitodo` can call an external command to help. It is off unless you configure
+one, and it is not tied to any provider — anything that takes a prompt and
+prints JSON works.
+
+```toml
+[agent]
+command     = ["claude", "--print"]
+schema_flag = "--json-schema"
+
+[agent.prompts]
+scan = "~/.config/mitodo/prompts/scan.md"   # your own prompt, kept local
+```
+
+| key | verb | writes? |
+|---|---|---|
+| `n` | describe a filter in words; it builds the query and shows you what it built | no |
+| `S` | summarise what's on screen | no |
+| `b` | break the selected item into sub-items | after review |
+| `R` | scan for changes across the workspace | after review |
+
+Anything that writes shows you a diff first and applies through the same
+conflict-aware writer, so a stale proposal is refused rather than forced.
+
+## Configuration
+
+```toml
+[workspace]
+root      = "~/notes/todo"
+group_by  = "directory"        # or "heading"
+todo_glob = "*/TODO.md"
+
+[priority]
+source  = "heading"            # "heading" | "tag" | "none"
+pattern = "^P([0-3])"
+
+[git]
+enabled = true
+sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"], ["pull", "--rebase"], ["push"]]
+```
+
+`s` runs the `git.sync` command list in the workspace and shows you the output.
+The list is yours to change; set `enabled = false` to remove the key.
+
+## Credits
+
+mitodo is a fork of [eilmeldung](https://github.com/christo-auer/eilmeldung) by
+christo-auer — a TUI RSS reader whose terminal foundations, theme system and
+overall shape this project is built on. The RSS layer was replaced with a
+markdown todo store; the debt for everything underneath it is real. See
+[NOTICE](NOTICE).
+
+## Licence
+
+GPL-3.0-or-later, inherited from eilmeldung. See [LICENSE](LICENSE).

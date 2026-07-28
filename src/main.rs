@@ -112,6 +112,22 @@ async fn run_tui(config_path: &Path) -> Result<()> {
         });
     });
 
+    // Drives the chyron. Cheap enough to run unconditionally; the app
+    // ignores ticks when the ticker is off.
+    let tick_sender = message_sender.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(120));
+        loop {
+            interval.tick().await;
+            if tick_sender
+                .send(Message::Event(messages::Event::Tick))
+                .is_err()
+            {
+                return;
+            }
+        }
+    });
+
     // Terminal polling blocks, so it runs off the async runtime.
     let _input_handle = spawn_blocking(move || {
         if let Err(err) = input::input_reader(message_sender) {

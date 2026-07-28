@@ -4,7 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use super::{App, Focus, Mode, viewport_start};
+use super::{App, Focus, Mode, chyron, viewport_start};
 
 /// The horizontal bands of the screen, top to bottom.
 ///
@@ -304,6 +304,15 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
+    // The ticker takes over the status row when enabled, as in eilmeldung.
+    if let Some(ticker) = &app.ticker
+        && app.mode == Mode::Normal
+        && app.notice.is_none()
+        && app.query_error.is_none()
+    {
+        chyron::render_ticker(frame, area, ticker, theme);
+        return;
+    }
     let line = match (&app.query_error, &app.notice, app.mode) {
         (Some(err), _, _) => Line::from(Span::styled(
             format!(" query error: {err} "),

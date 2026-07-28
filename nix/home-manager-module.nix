@@ -3,20 +3,20 @@
 with lib;
 
 let
-  cfg = config.programs.eilmeldung;
+  cfg = config.programs.mitodo;
   settingsFormat = pkgs.formats.toml { };
   configFile = settingsFormat.generate "config.toml" cfg.settings;
 in {
-  meta.maintainers = [ "christo-auer" ];
+  meta.maintainers = [ "gwicho38" ];
 
-  options.programs.eilmeldung = {
-    enable = mkEnableOption "eilmeldung, a feature-rich TUI RSS reader";
+  options.programs.mitodo = {
+    enable = mkEnableOption "mitodo, a feature-rich TUI RSS reader";
 
     package = mkOption {
       type = types.package;
-      default = pkgs.eilmeldung;
-      defaultText = literalExpression "pkgs.eilmeldung";
-      description = "The eilmeldung package to use.";
+      default = pkgs.mitodo;
+      defaultText = literalExpression "pkgs.mitodo";
+      description = "The mitodo package to use.";
     };
 
     settings = mkOption {
@@ -48,9 +48,9 @@ in {
         }
       '';
       description = ''
-        Configuration written to {file}`$XDG_CONFIG_HOME/eilmeldung/config.toml`.
+        Configuration written to {file}`$XDG_CONFIG_HOME/mitodo/config.toml`.
         
-        See <https://github.com/christo-auer/eilmeldung#configuration-options>
+        See <https://github.com/gwicho38/mitodo#configuration-options>
         for the full list of options.
       '';
     };
@@ -59,7 +59,7 @@ in {
   config = mkIf cfg.enable {
     home.packages = [ cfg.package ];
 
-    xdg.configFile."eilmeldung/config.toml" = mkIf (cfg.settings != { }) {
+    xdg.configFile."mitodo/config.toml" = mkIf (cfg.settings != { }) {
       source = configFile;
     };
   };

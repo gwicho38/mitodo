@@ -1,3 +1,4 @@
+pub mod chyron;
 mod view;
 
 use ratatui::DefaultTerminal;
@@ -15,6 +16,7 @@ use crate::query::Query;
 use crate::store::Workspace;
 use crate::store::model::{Group, Item};
 use crate::store::{self, WriteError};
+use chyron::TickerState;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Which pane takes keyboard input.
@@ -92,6 +94,8 @@ pub struct App {
     pub pending: Option<ChangeSet>,
     /// Label of a background task in flight.
     pub busy: Option<String>,
+    /// Scrolling ticker, when enabled.
+    pub ticker: Option<TickerState>,
     sender: Option<UnboundedSender<Msg>>,
     config: Config,
     should_quit: bool,
@@ -116,6 +120,7 @@ impl App {
             modal: None,
             pending: None,
             busy: None,
+            ticker: None,
             sender: None,
             should_quit: false,
         }
@@ -182,6 +187,12 @@ impl App {
             // A redraw follows every message, so a resize needs no handling.
             Message::Event(Event::Resized(..)) => {}
             Message::Event(Event::Mouse(_)) => {}
+            Message::Event(Event::Tick) => {
+                if let Some(mut ticker) = self.ticker.take() {
+                    ticker.advance();
+                    self.ticker = Some(ticker);
+                }
+            }
             Message::Event(Event::TaskFinished { title, body }) => {
                 self.busy = None;
                 self.open_modal(&title, body.lines().map(|l| l.to_string()).collect());
@@ -352,6 +363,22 @@ impl App {
             (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
             (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
             (K::Char('s'), KeyModifiers::NONE) => self.spawn_git_sync(),
+            (K::Char('c'), KeyModifiers::NONE) => self.toggle_ticker(),
+            (K::Char('p'), KeyModifiers::NONE) => {
+                if let Some(ticker) = &mut self.ticker {
+                    ticker.toggle_pause();
+                }
+            }
+            (K::Char('+'), _) => {
+                if let Some(ticker) = &mut self.ticker {
+                    ticker.speed_up();
+                }
+            }
+            (K::Char('-'), _) => {
+                if let Some(ticker) = &mut self.ticker {
+                    ticker.speed_down();
+                }
+            }
             (K::Char('?'), _) => self.open_modal("keys", help_lines()),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
             (K::Char('S'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Summarize, String::new()),
@@ -512,6 +539,36 @@ impl App {
         }
         let len = self.visible_items().len();
         self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+
+        // The ticker mirrors the workspace, so it follows every reload.
+        if let Some(mut ticker) = self.ticker.take() {
+            let offset = ticker.offset;
+            self.refill_ticker(&mut ticker);
+            // Keep the scroll position so a background reload does not make
+            // the ticker visibly jump back to the start.
+            ticker.offset = offset;
+            self.ticker = Some(ticker);
+        }
+    }
+
+    /// Turn the ticker on or off, seeding it from the current view.
+    fn toggle_ticker(&mut self) {
+        if self.ticker.is_some() {
+            self.ticker = None;
+            return;
+        }
+        let mut ticker = TickerState::new(2);
+        self.refill_ticker(&mut ticker);
+        self.ticker = Some(ticker);
+    }
+
+    fn refill_ticker(&self, ticker: &mut TickerState) {
+        let entries: Vec<_> = self
+            .visible_items()
+            .into_iter()
+            .map(|item| (item, self.workspace.group_name_for(item)))
+            .collect();
+        ticker.fill(entries.into_iter());
     }
 
     fn open_modal(&mut self, title: &str, body: Vec<String>) {
@@ -680,6 +737,10 @@ fn help_lines() -> Vec<String> {
         "  n  natural language to query",
         "  S  summarise view     b  break down item",
         "  R  scan for changes   s  git sync",
+        "",
+        "chyron",
+        "  c  toggle ticker      p  pause",
+        "  +/-  faster/slower",
         "",
         "  ?  this help          q  quit",
     ]
@@ -1133,6 +1194,61 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn c_toggles_the_ticker() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(app.ticker.is_none());
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.ticker.is_some(), "ticker on");
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.ticker.is_none(), "ticker off");
+    }
+
+    #[test]
+    fn the_ticker_is_seeded_with_open_items_only() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('c'));
+        let ticker = app.ticker.as_ref().unwrap();
+        assert_eq!(ticker.items.len(), 1, "beta is done and excluded");
+        assert_eq!(ticker.items[0].text, "alpha");
+        assert_eq!(ticker.items[0].group, "lefv");
+    }
+
+    #[test]
+    fn ticks_advance_only_when_the_ticker_is_on() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::Tick));
+        assert!(app.ticker.is_none(), "a tick with no ticker is harmless");
+
+        press(&mut app, KeyCode::Char('c'));
+        app.handle(Message::Event(Event::Tick));
+        assert!(app.ticker.as_ref().unwrap().offset > 0, "scrolled");
+    }
+
+    #[test]
+    fn p_pauses_the_ticker() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('c'));
+        press(&mut app, KeyCode::Char('p'));
+        app.handle(Message::Event(Event::Tick));
+        assert_eq!(app.ticker.as_ref().unwrap().offset, 0, "paused");
+    }
+
+    #[test]
+    fn a_write_refills_the_ticker() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(app.ticker.as_ref().unwrap().items.len(), 1);
+
+        // Completing the only open item empties the queue.
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(
+            app.ticker.as_ref().unwrap().items.len(),
+            0,
+            "ticker follows the workspace"
         );
     }
 

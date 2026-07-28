@@ -12,7 +12,7 @@
 }:
 
 rustPlatform.buildRustPackage {
-  pname = "eilmeldung";
+  pname = "mitodo";
   version = "1.1.0";
   
   src = ../.;
@@ -48,9 +48,9 @@ rustPlatform.buildRustPackage {
   
   meta = with lib; {
     description = "A feature-rich TUI RSS Reader based on the news-flash library";
-    homepage = "https://github.com/christo-auer/eilmeldung";
+    homepage = "https://github.com/gwicho38/mitodo";
     license = licenses.gpl3Plus;
-    maintainers = [ "christo-auer" ];
-    mainProgram = "eilmeldung";
+    maintainers = [ "gwicho38" ];
+    mainProgram = "mitodo";
   };
 }

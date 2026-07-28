@@ -1,0 +1,43 @@
+mitodo
+Copyright (C) 2026 Luis Fernandez de la Vara
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+--------------------------------------------------------------------------------
+
+mitodo is a fork of eilmeldung
+    https://github.com/christo-auer/eilmeldung
+    Copyright (C) christo-auer
+    Licensed GPL-3.0-or-later
+
+eilmeldung is a TUI RSS reader built on the news-flash library. mitodo was
+created by forking it at version 1.1.0 and replacing the RSS layer with a store
+over markdown todo files. The full commit history of eilmeldung is preserved in
+this repository, and `git remote add upstream
+https://github.com/christo-auer/eilmeldung` tracks the original.
+
+What mitodo inherits from eilmeldung, in whole or in substantial part:
+
+  src/config/theme.rs   the colour palette, style set and theming model,
+                        used essentially unchanged
+  src/input/mod.rs      the terminal input reader loop
+  src/ui/view.rs        the overall screen layout: top bar, three panes,
+                        command line, status row
+  src/ui/chyron.rs      the scrolling ticker concept and its scroll state
+                        machine, reimplemented for todo items
+
+What was written for mitodo rather than ported:
+
+  src/store/            markdown parsing, the conflict-aware writer, workspace
+                        detection and loading, the filesystem watcher
+  src/query/            the query language, parser and matcher
+  src/agent/            the external-agent pipeline and change-set application
+  src/ui/mod.rs         the application state and event loop
+  src/git.rs            git sync
+
+Since mitodo is a derivative work of eilmeldung, it is distributed under the
+same licence, GPL-3.0-or-later. Any redistribution of mitodo, modified or not,
+must preserve this notice and remain under that licence.

@@ -9,13 +9,13 @@
   outputs = { self, nixpkgs, flake-utils, ... }:
     {
       overlays.default = final: prev: {
-        eilmeldung = final.callPackage ./nix/package.nix {
+        mitodo = final.callPackage ./nix/package.nix {
           inherit (final) llvmPackages_19;
         };
       };
       
       homeManager.default = import ./nix/home-manager-module.nix;
-      homeManager.eilmeldung = self.outputs.homeManager.default;
+      homeManager.mitodo = self.outputs.homeManager.default;
     }
     // flake-utils.lib.eachDefaultSystem (system:
       let
@@ -25,10 +25,10 @@
       in
       {
         packages = {
-          eilmeldung = pkgs.callPackage ./nix/package.nix {
+          mitodo = pkgs.callPackage ./nix/package.nix {
             inherit (pkgs) llvmPackages_19;
           };
-          default = self.outputs.packages.${system}.eilmeldung;
+          default = self.outputs.packages.${system}.mitodo;
         };
 
         devShells.default = import ./nix/shell.nix { inherit pkgs; };

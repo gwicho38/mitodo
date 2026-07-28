@@ -19,4 +19,6 @@ pub enum Event {
     ChangeSetProposed(crate::agent::ChangeSet),
     /// An agent returned a query string to adopt.
     QueryProposed(String),
+    /// Periodic tick that advances the chyron.
+    Tick,
 }

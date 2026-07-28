@@ -134,20 +134,20 @@ jobs:
 
       - name: Create package directory
         run: |
-          mkdir -p package/eilmeldung
-          cp target/${{ matrix.target }}/release/eilmeldung package/eilmeldung/
-          cp -r examples package/eilmeldung/
+          mkdir -p package/mitodo
+          cp target/${{ matrix.target }}/release/mitodo package/mitodo/
+          cp -r examples package/mitodo/
 
       - name: Create tarball
         run: |
           cd package
-          tar -czf eilmeldung-${{ matrix.target }}-latest.tar.gz eilmeldung/
+          tar -czf mitodo-${{ matrix.target }}-latest.tar.gz mitodo/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eilmeldung-${{ matrix.target }}-latest
-          path: package/eilmeldung-${{ matrix.target }}-latest.tar.gz
+          name: mitodo-${{ matrix.target }}-latest
+          path: package/mitodo-${{ matrix.target }}-latest.tar.gz
           retention-days: 30
 
 
@@ -221,18 +221,18 @@ jobs:
 
       - name: Create package directory
         run: |
-          mkdir -p package/eilmeldung
-          cp target/${{ matrix.target }}/release/eilmeldung package/eilmeldung/
-          cp -r examples package/eilmeldung/
+          mkdir -p package/mitodo
+          cp target/${{ matrix.target }}/release/mitodo package/mitodo/
+          cp -r examples package/mitodo/
 
       - name: Create tarball
         run: |
           cd package
-          tar -czf eilmeldung-${{ matrix.target }}-latest.tar.gz eilmeldung/
+          tar -czf mitodo-${{ matrix.target }}-latest.tar.gz mitodo/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: eilmeldung-${{ matrix.target }}-latest
-          path: package/eilmeldung-${{ matrix.target }}-latest.tar.gz
+          name: mitodo-${{ matrix.target }}-latest
+          path: package/mitodo-${{ matrix.target }}-latest.tar.gz
           retention-days: 30
