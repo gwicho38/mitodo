@@ -5,7 +5,9 @@
 pub mod detect;
 pub mod model;
 pub mod parse;
+pub mod write;
 
 pub use detect::{Detection, detect};
 pub use model::{Group, Item, ItemId, Priority};
 pub use parse::parse_todo_file;
+pub use write::{WriteError, add_item, delete_item, edit_text, set_description, toggle};
