@@ -2,7 +2,20 @@
 
 > **For agentic workers:** each stage below is a separate plan-and-execute cycle. Write the stage's detailed plan (superpowers:writing-plans) before implementing it. Do not attempt the whole phase in one pass.
 
-**Status:** decomposition agreed, stage A not yet planned in detail.
+**Status:** all five stages complete (2026-07-28). 134 tests passing.
+
+| stage | delivered |
+|---|---|
+| A — a TUI that runs | three-pane frame over the real workspace, quits on `q` |
+| B — browse | group/item cursors, vim nav, focus, hide-done, scrolling, detail pane |
+| C — query | `acct:` `pri:` `done` `sec:` `has:desc` `text:` with AND/OR/NOT and parens |
+| D — mutate | toggle, add sibling/child, edit, description, delete-with-confirm |
+| E — live reload | debounced notify watcher, own writes silent, external edits announced |
+
+Still in `src/_port/`: `messages/command` and the keybinding engine (only needed
+for a configurable `:` command vocabulary), the three original list panes, and
+`chyron` (phase 3). `config/login_configuration.rs` and
+`feed_list_content_identfier.rs` are dead and can be deleted.
 
 ## Why this is decomposed
 
