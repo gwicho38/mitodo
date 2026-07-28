@@ -92,6 +92,23 @@ async fn run_tui(config_path: &Path) -> Result<()> {
 
     let (message_sender, message_receiver) = unbounded_channel::<Message>();
 
+    // Watch the workspace so edits by Claude, mcli or todos-mcp show up
+    // without a restart. Blocking, so it gets its own thread.
+    let watch_root = config.workspace.root.clone();
+    let watched_files: Vec<_> = workspace
+        .groups
+        .iter()
+        .map(|g| g.todo_file.clone())
+        .collect();
+    let watch_sender = message_sender.clone();
+    let _watch_handle = spawn_blocking(move || {
+        store::watch::watch_blocking(&watch_root, watched_files, || {
+            watch_sender
+                .send(Message::Event(messages::Event::WorkspaceReloaded))
+                .is_ok()
+        });
+    });
+
     // Terminal polling blocks, so it runs off the async runtime.
     let _input_handle = spawn_blocking(move || {
         if let Err(err) = input::input_reader(message_sender) {

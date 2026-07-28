@@ -78,6 +78,24 @@ impl Workspace {
         self.items.iter().filter(|i| !i.done).count()
     }
 
+    /// Digest of everything the UI renders.
+    ///
+    /// Lets a reload tell "the workspace actually changed" from "these are the
+    /// bytes I just wrote myself", without the app and the watcher thread
+    /// having to share mutable snapshot state.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for item in &self.items {
+            hasher.update(item.file.as_os_str().as_encoded_bytes());
+            hasher.update(item.line.to_le_bytes());
+            hasher.update(item.raw.as_bytes());
+            hasher.update(item.description.as_bytes());
+            hasher.update([0x1f]);
+        }
+        hasher.finalize().into()
+    }
+
     /// Name of the group an item belongs to, resolved by its source file.
     ///
     /// The query language's `acct:` needs this, and `Item` deliberately stores

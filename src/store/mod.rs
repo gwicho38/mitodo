@@ -5,6 +5,7 @@
 pub mod detect;
 pub mod model;
 pub mod parse;
+pub mod watch;
 pub mod workspace;
 pub mod write;
 

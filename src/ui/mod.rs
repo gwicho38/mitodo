@@ -155,7 +155,19 @@ impl App {
             // A redraw follows every message, so a resize needs no handling.
             Message::Event(Event::Resized(..)) => {}
             Message::Event(Event::Mouse(_)) => {}
-            Message::Event(Event::WorkspaceReloaded) => {}
+            Message::Event(Event::WorkspaceReloaded) => {
+                // Don't stomp on a half-typed edit; the reload lands when the
+                // user finishes. Only announce a change that is actually
+                // someone else's — mitodo's own writes reload eagerly and so
+                // leave the fingerprint already up to date.
+                if self.mode == Mode::Normal {
+                    let before = self.workspace.fingerprint();
+                    self.reload();
+                    if self.workspace.fingerprint() != before {
+                        self.notice = Some("workspace changed on disk, reloaded".to_string());
+                    }
+                }
+            }
         }
     }
 
@@ -868,6 +880,61 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn an_own_write_does_not_announce_an_external_change() {
+        // Regression: the watcher's digest snapshot lives on its own thread and
+        // cannot tell whose write it saw, so a reload triggered right after
+        // mitodo's own toggle used to report "changed on disk".
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.notice.is_none(), "own write is silent");
+
+        app.handle(Message::Event(Event::WorkspaceReloaded));
+        assert!(
+            app.notice.is_none(),
+            "a watcher event for our own write stays silent, got {:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn an_external_change_is_announced_on_reload() {
+        let (_d, mut app) = disk_app(DOC);
+        std::fs::write(
+            file_of(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n- [x] beta\n- [ ] gamma\n",
+        )
+        .unwrap();
+
+        app.handle(Message::Event(Event::WorkspaceReloaded));
+        assert_eq!(app.workspace.items.len(), 3, "picked up the new item");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("changed on disk"),
+            "external change announced"
+        );
+    }
+
+    #[test]
+    fn a_reload_while_editing_is_deferred() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('e'));
+        std::fs::write(
+            file_of(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n- [x] beta\n- [ ] gamma\n",
+        )
+        .unwrap();
+
+        app.handle(Message::Event(Event::WorkspaceReloaded));
+        assert_eq!(
+            app.workspace.items.len(),
+            2,
+            "a half-typed edit is not stomped on"
         );
     }
 
