@@ -32,6 +32,8 @@ pub struct Config {
     pub agent: AgentConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub due: DueConfig,
 }
 
 /// View state that survives a restart, the way `mcli todos` remembered it.
@@ -110,6 +112,26 @@ pub struct AgentConfig {
 impl AgentConfig {
     pub fn is_disabled(&self) -> bool {
         self.command.is_empty()
+    }
+}
+
+/// How a due date is written inside an item's text.
+///
+/// Kept as a pattern rather than a fixed syntax so an existing convention —
+/// `due:2026-08-01`, `(due 2026-08-01)`, `📅 2026-08-01` — keeps working.
+/// Capture group 1 must yield an ISO `YYYY-MM-DD` date.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DueConfig {
+    pub enabled: bool,
+    pub pattern: String,
+}
+
+impl Default for DueConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pattern: r"due:(\d{4}-\d{2}-\d{2})".to_string(),
+        }
     }
 }
 

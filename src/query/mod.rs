@@ -12,9 +12,15 @@
 //! has:desc           has a description block
 //! text:"onehouse"    substring, case-insensitive
 //! onehouse           bare word — same as text:
-//! sort:pri,text      ordering; pri, text, group, section, done
+//! due:2026-08-01     on that day; also <=, >=, <, >
+//! due:today  due:7d   relative: today, tomorrow, Nd days from now
+//! due:none            has no deadline
+//! overdue             due before today and not finished
+//! sort:pri,text      ordering; pri, text, group, section, done, due
 //! AND OR NOT ( )     combinators; adjacency implies AND
 //! ```
+
+use chrono::{Duration, Local, NaiveDate};
 
 use crate::store::model::{Item, Priority};
 
@@ -32,6 +38,8 @@ pub enum QueryError {
     UnknownField(String),
     #[error("missing closing parenthesis")]
     UnclosedParen,
+    #[error("{0:?} is not a date (expected YYYY-MM-DD, today, tomorrow or Nd)")]
+    BadDate(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,11 +68,34 @@ impl Cmp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
     Group(String),
+    /// Comparison against a deadline, resolved relative to the current day.
+    Due(Cmp, DueTarget),
+    /// True when the item has no deadline.
+    NoDue,
+    /// Unfinished and past its deadline.
+    Overdue,
     Priority(Cmp, Priority),
     Done(bool),
     Section(String),
     HasDescription,
     Text(String),
+}
+
+/// A deadline to compare against. Relative forms are resolved at match time,
+/// so a session left open overnight still means "today" tomorrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DueTarget {
+    On(NaiveDate),
+    DaysFromToday(i64),
+}
+
+impl DueTarget {
+    fn resolve(self, today: NaiveDate) -> NaiveDate {
+        match self {
+            DueTarget::On(date) => date,
+            DueTarget::DaysFromToday(days) => today + Duration::days(days),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +114,7 @@ pub enum SortKey {
     Group,
     Section,
     Done,
+    Due,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,9 +159,17 @@ impl Query {
     }
 
     /// `group` is the name of the group the item belongs to, needed by `acct:`.
+    ///
+    /// Relative deadlines resolve against the current day on every call, so a
+    /// long-running session does not go stale at midnight.
     pub fn matches(&self, item: &Item, group: Option<&str>) -> bool {
+        self.matches_on(item, group, Local::now().date_naive())
+    }
+
+    /// Match against an explicit "today", for deterministic tests.
+    pub fn matches_on(&self, item: &Item, group: Option<&str>, today: NaiveDate) -> bool {
         match &self.clause {
-            Some(clause) => eval(clause, item, group),
+            Some(clause) => eval(clause, item, group, today),
             None => true,
         }
     }
@@ -148,6 +188,13 @@ impl Query {
                     SortKey::Group => a_group.unwrap_or("").cmp(b_group.unwrap_or("")),
                     SortKey::Section => a.section.cmp(&b.section),
                     SortKey::Done => a.done.cmp(&b.done),
+                    // Items with no deadline sort last rather than first.
+                    SortKey::Due => match (a.due, b.due) {
+                        (Some(x), Some(y)) => x.cmp(&y),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    },
                 };
                 if ordering != std::cmp::Ordering::Equal {
                     return ordering;
@@ -168,23 +215,39 @@ fn parse_sort(spec: &str) -> Result<Vec<SortKey>, QueryError> {
             "acct" | "account" | "group" => Ok(SortKey::Group),
             "sec" | "section" => Ok(SortKey::Section),
             "done" => Ok(SortKey::Done),
+            "due" => Ok(SortKey::Due),
             other => Err(QueryError::UnknownField(format!("sort:{other}"))),
         })
         .collect()
 }
 
-fn eval(clause: &Clause, item: &Item, group: Option<&str>) -> bool {
+fn eval(clause: &Clause, item: &Item, group: Option<&str>, today: NaiveDate) -> bool {
     match clause {
-        Clause::And(a, b) => eval(a, item, group) && eval(b, item, group),
-        Clause::Or(a, b) => eval(a, item, group) || eval(b, item, group),
-        Clause::Not(inner) => !eval(inner, item, group),
-        Clause::Atom(atom) => eval_atom(atom, item, group),
+        Clause::And(a, b) => eval(a, item, group, today) && eval(b, item, group, today),
+        Clause::Or(a, b) => eval(a, item, group, today) || eval(b, item, group, today),
+        Clause::Not(inner) => !eval(inner, item, group, today),
+        Clause::Atom(atom) => eval_atom(atom, item, group, today),
     }
 }
 
-fn eval_atom(atom: &Atom, item: &Item, group: Option<&str>) -> bool {
+fn eval_atom(atom: &Atom, item: &Item, group: Option<&str>, today: NaiveDate) -> bool {
     match atom {
         Atom::Group(name) => group.is_some_and(|g| g.eq_ignore_ascii_case(name)),
+        Atom::NoDue => item.due.is_none(),
+        Atom::Overdue => item.due.is_some_and(|d| d < today) && !item.done,
+        Atom::Due(cmp, target) => match item.due {
+            None => false,
+            Some(due) => {
+                let against = target.resolve(today);
+                match cmp {
+                    Cmp::Eq => due == against,
+                    Cmp::Le => due <= against,
+                    Cmp::Ge => due >= against,
+                    Cmp::Lt => due < against,
+                    Cmp::Gt => due > against,
+                }
+            }
+        },
         Atom::Priority(cmp, priority) => cmp.test(item.priority, *priority),
         Atom::Done(want) => item.done == *want,
         Atom::Section(needle) => item.section.to_lowercase().contains(&needle.to_lowercase()),
@@ -329,9 +392,44 @@ fn unquote(value: &str) -> String {
     value.trim_matches('"').to_string()
 }
 
+/// Parse the value side of `due:`, e.g. `2026-08-01`, `today`, `7d`, `none`.
+fn parse_due(raw: &str) -> Result<Atom, QueryError> {
+    let (cmp, rest) = if let Some(r) = raw.strip_prefix("<=") {
+        (Cmp::Le, r)
+    } else if let Some(r) = raw.strip_prefix(">=") {
+        (Cmp::Ge, r)
+    } else if let Some(r) = raw.strip_prefix('<') {
+        (Cmp::Lt, r)
+    } else if let Some(r) = raw.strip_prefix('>') {
+        (Cmp::Gt, r)
+    } else {
+        (Cmp::Eq, raw)
+    };
+
+    let rest = rest.trim();
+    if rest.eq_ignore_ascii_case("none") {
+        return Ok(Atom::NoDue);
+    }
+    let target = match rest.to_lowercase().as_str() {
+        "today" => DueTarget::DaysFromToday(0),
+        "tomorrow" => DueTarget::DaysFromToday(1),
+        "yesterday" => DueTarget::DaysFromToday(-1),
+        other => match other.strip_suffix('d').and_then(|n| n.parse::<i64>().ok()) {
+            Some(days) => DueTarget::DaysFromToday(days),
+            None => NaiveDate::parse_from_str(other, "%Y-%m-%d")
+                .map(DueTarget::On)
+                .map_err(|_| QueryError::BadDate(rest.to_string()))?,
+        },
+    };
+    Ok(Atom::Due(cmp, target))
+}
+
 fn parse_atom(token: &str) -> Result<Atom, QueryError> {
     if token.eq_ignore_ascii_case("done") {
         return Ok(Atom::Done(true));
+    }
+    if token.eq_ignore_ascii_case("overdue") {
+        return Ok(Atom::Overdue);
     }
 
     let Some((field, value)) = token.split_once(':') else {
@@ -342,6 +440,7 @@ fn parse_atom(token: &str) -> Result<Atom, QueryError> {
         "acct" | "account" | "group" => Ok(Atom::Group(unquote(value))),
         "sec" | "section" => Ok(Atom::Section(unquote(value))),
         "text" => Ok(Atom::Text(unquote(value))),
+        "due" => parse_due(&unquote(value)),
         "has" => match unquote(value).to_lowercase().as_str() {
             "desc" | "description" => Ok(Atom::HasDescription),
             other => Err(QueryError::UnknownField(format!("has:{other}"))),
@@ -391,6 +490,7 @@ mod tests {
             section: "P1 — High Priority".to_string(),
             heading: "H".to_string(),
             priority,
+            due: None,
             parent: None,
             children: Vec::new(),
         }
@@ -612,6 +712,120 @@ mod tests {
             Query::parse("sort:bogus"),
             Err(QueryError::UnknownField("sort:bogus".to_string()))
         );
+    }
+
+    // --- deadlines ---
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 7, 28).unwrap()
+    }
+
+    fn due_item(text: &str, done: bool, due: Option<&str>) -> Item {
+        let mut it = item(text, done, Priority::None);
+        it.due = due.map(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap());
+        it
+    }
+
+    fn matches_today(query: &str, item: &Item) -> bool {
+        Query::parse(query)
+            .expect("query parses")
+            .expect("not empty")
+            .matches_on(item, None, today())
+    }
+
+    #[test]
+    fn due_matches_an_exact_date() {
+        let it = due_item("a", false, Some("2026-08-01"));
+        assert!(matches_today("due:2026-08-01", &it));
+        assert!(!matches_today("due:2026-08-02", &it));
+    }
+
+    #[test]
+    fn due_today_and_tomorrow_resolve_relative_to_now() {
+        let today_item = due_item("a", false, Some("2026-07-28"));
+        let tomorrow_item = due_item("b", false, Some("2026-07-29"));
+        assert!(matches_today("due:today", &today_item));
+        assert!(!matches_today("due:today", &tomorrow_item));
+        assert!(matches_today("due:tomorrow", &tomorrow_item));
+    }
+
+    #[test]
+    fn a_day_offset_resolves_relative_to_now() {
+        let it = due_item("a", false, Some("2026-08-04"));
+        assert!(matches_today("due:7d", &it), "7 days after 2026-07-28");
+        assert!(matches_today("due:<=7d", &it));
+        assert!(!matches_today("due:<=3d", &it));
+    }
+
+    #[test]
+    fn due_comparisons_work() {
+        let it = due_item("a", false, Some("2026-08-01"));
+        assert!(matches_today("due:<2026-08-02", &it));
+        assert!(matches_today("due:>2026-07-31", &it));
+        assert!(matches_today("due:>=2026-08-01", &it));
+        assert!(!matches_today("due:<2026-08-01", &it));
+    }
+
+    #[test]
+    fn an_item_without_a_deadline_never_matches_a_date_comparison() {
+        let it = due_item("a", false, None);
+        assert!(!matches_today("due:<=7d", &it));
+        assert!(!matches_today("due:today", &it));
+    }
+
+    #[test]
+    fn due_none_finds_items_without_a_deadline() {
+        assert!(matches_today("due:none", &due_item("a", false, None)));
+        assert!(!matches_today(
+            "due:none",
+            &due_item("a", false, Some("2026-08-01"))
+        ));
+    }
+
+    #[test]
+    fn overdue_is_past_and_unfinished() {
+        let late = due_item("a", false, Some("2026-07-27"));
+        let late_but_done = due_item("b", true, Some("2026-07-27"));
+        let due_today = due_item("c", false, Some("2026-07-28"));
+
+        assert!(matches_today("overdue", &late));
+        assert!(
+            !matches_today("overdue", &late_but_done),
+            "finished work is not overdue"
+        );
+        assert!(
+            !matches_today("overdue", &due_today),
+            "due today is not yet overdue"
+        );
+    }
+
+    #[test]
+    fn deadlines_compose_with_other_terms() {
+        let it = due_item("brief", false, Some("2026-07-29"));
+        assert!(matches_today("!done due:<=7d brief", &it));
+        assert!(!matches_today("done due:<=7d", &it));
+    }
+
+    #[test]
+    fn sort_by_due_puts_the_soonest_first_and_undated_last() {
+        let items = [
+            due_item("later", false, Some("2026-09-01")),
+            due_item("undated", false, None),
+            due_item("sooner", false, Some("2026-08-01")),
+        ];
+        assert_eq!(
+            sorted("sort:due", &items),
+            vec!["sooner", "later", "undated"]
+        );
+    }
+
+    #[test]
+    fn a_malformed_date_is_rejected() {
+        assert_eq!(
+            Query::parse("due:not-a-date"),
+            Err(QueryError::BadDate("not-a-date".to_string()))
+        );
+        assert!(Query::parse("due:2026-13-45").is_err(), "month 13");
     }
 
     #[test]

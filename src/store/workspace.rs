@@ -58,6 +58,7 @@ impl Workspace {
                 &file_rel,
                 &source,
                 &config.priority,
+                &config.due,
             ));
         }
 

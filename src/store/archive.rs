@@ -145,7 +145,7 @@ fn append_to_archive(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PriorityConfig;
+    use crate::config::{DueConfig, PriorityConfig};
     use crate::store::parse_todo_file;
     use std::path::PathBuf;
 
@@ -154,7 +154,13 @@ mod tests {
         let todo = dir.path().join("TODO.md");
         let archive = dir.path().join("_archive");
         std::fs::write(&todo, body).unwrap();
-        let items = parse_todo_file(&todo, "TODO.md", body, &PriorityConfig::default());
+        let items = parse_todo_file(
+            &todo,
+            "TODO.md",
+            body,
+            &PriorityConfig::default(),
+            &DueConfig::default(),
+        );
         (dir, todo, archive, items)
     }
 
@@ -235,7 +241,13 @@ mod tests {
     fn archiving_twice_appends_rather_than_overwriting() {
         let (dir, todo, archive, _r) = run("## P0\n\n- [x] first\n");
         std::fs::write(&todo, "## P0\n\n- [x] second\n").unwrap();
-        let items = parse_todo_file(&todo, "TODO.md", &read(&todo), &PriorityConfig::default());
+        let items = parse_todo_file(
+            &todo,
+            "TODO.md",
+            &read(&todo),
+            &PriorityConfig::default(),
+            &DueConfig::default(),
+        );
         archive_done(&todo, &archive, &items, "2026-07-29").unwrap();
 
         let text = read(&archive.join("TODO.md"));

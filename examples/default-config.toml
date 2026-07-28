@@ -44,6 +44,13 @@ sync = [
     ["push"],
 ]
 
+[due]
+# Deadlines written inside the item text, e.g. "- [ ] file it due:2026-08-01".
+# Capture group 1 must yield an ISO YYYY-MM-DD date, so an existing convention
+# keeps working. Set enabled = false to ignore dates entirely.
+enabled = true
+pattern = 'due:(\d{4}-\d{2}-\d{2})'
+
 [ui]
 # View state mitodo remembers between runs. Written on exit, and only when
 # something actually changed, so a config you are editing by hand is left

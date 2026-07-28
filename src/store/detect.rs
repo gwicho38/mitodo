@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use crate::config::{Config, GitConfig, GroupBy, PriorityConfig, PrioritySource, WorkspaceConfig};
+use crate::config::{
+    Config, DueConfig, GitConfig, GroupBy, PriorityConfig, PrioritySource, WorkspaceConfig,
+};
 
 use super::model::Priority;
 
@@ -115,6 +117,23 @@ pub fn detect(root: &Path) -> Result<Detection, DetectError> {
         (None, None)
     };
 
+    // Report whether the workspace already uses deadlines, so `init` says what
+    // it found rather than silently enabling a feature.
+    let due = DueConfig::default();
+    let due_re = regex::Regex::new(&due.pattern).ok();
+    let dated = due_re
+        .map(|re| {
+            sample_files
+                .iter()
+                .filter_map(|f| std::fs::read_to_string(f).ok())
+                .map(|text| text.lines().filter(|l| re.is_match(l)).count())
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    if dated > 0 {
+        notes.push(format!("{dated} item(s) with due: deadlines"));
+    }
+
     let git_enabled = root.join(".git").exists();
     if git_enabled {
         notes.push("git repository, sync enabled".to_string());
@@ -144,6 +163,7 @@ pub fn detect(root: &Path) -> Result<Detection, DetectError> {
             git,
             agent: Default::default(),
             ui: Default::default(),
+            due,
         },
         notes,
     })
@@ -209,6 +229,32 @@ mod tests {
         fs::write(dir.path().join("TODO.md"), "## Shopping\n\n- [ ] milk\n").unwrap();
         let found = detect(dir.path()).unwrap();
         assert_eq!(found.config.priority.source, PrioritySource::None);
+    }
+
+    #[test]
+    fn reports_deadlines_when_the_workspace_uses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = dir.path().join("work");
+        fs::create_dir_all(&g).unwrap();
+        fs::write(
+            g.join("TODO.md"),
+            "## P0 — Critical\n\n- [ ] a due:2026-08-01\n- [ ] b\n",
+        )
+        .unwrap();
+
+        let found = detect(dir.path()).unwrap();
+        assert!(
+            found.notes.iter().any(|n| n.contains("deadlines")),
+            "init reports what it found: {:?}",
+            found.notes
+        );
+    }
+
+    #[test]
+    fn says_nothing_about_deadlines_when_there_are_none() {
+        let dir = dir_workspace();
+        let found = detect(dir.path()).unwrap();
+        assert!(!found.notes.iter().any(|n| n.contains("deadlines")));
     }
 
     #[test]

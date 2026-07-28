@@ -107,6 +107,8 @@ pub struct Item {
     /// The `### ` heading in force above this item.
     pub heading: String,
     pub priority: Priority,
+    /// Deadline parsed out of the item's text, if it carries one.
+    pub due: Option<chrono::NaiveDate>,
     pub parent: Option<ItemId>,
     pub children: Vec<ItemId>,
 }

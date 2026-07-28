@@ -91,6 +91,38 @@ setting covers either convention.
 
 A group can also carry a `notes.md` beside its `TODO.md`; `N` reads it.
 
+## Deadlines
+
+Write a date into the item itself and mitodo picks it up:
+
+```markdown
+- [ ] File the 83(b) election due:2026-08-01
+```
+
+The list shows how long you have — `today`, `tmrw`, `5d`, `3d ago` — with missed
+deadlines flagged, and the ticker leads with overdue work. The detail pane spells
+the date out in full.
+
+```
+▸ [ ] P0  3d ago  File 83(b) election due:2026-07-25
+  [ ] P0  today   Respond to opposing counsel due:2026-07-28
+  [ ] P0  5d      Draft the LLC agreement due:2026-08-02
+  [ ] P0  Someday: reorganise the shelf
+```
+
+The marker stays in the text, because the markdown file is the source of truth —
+editing an item keeps its deadline with it. If you already write dates a
+different way, point the config at your convention:
+
+```toml
+[due]
+enabled = true
+pattern = '\(due (\d{4}-\d{2}-\d{2})\)'   # matches "(due 2026-08-01)"
+```
+
+Capture group 1 must yield an ISO date. Set `enabled = false` to ignore dates
+entirely.
+
 ## Keys
 
 | | | | |
@@ -113,7 +145,8 @@ pri:P0 acct:work !done          urgent, mine, not finished
 sec:"High Priority" has:desc    by section, with notes attached
 (pri:P0 OR pri:P1) AND !done    parentheses and explicit operators
 onehouse                        bare words match text and descriptions
-sort:pri,text                   order by priority, then alphabetically
+overdue                         past its deadline and not finished
+due:<=7d !done sort:due         this week's work, soonest first
 ```
 
 | field | matches |
@@ -124,7 +157,9 @@ sort:pri,text                   order by priority, then alphabetically
 | `sec:` `section:` | the `## ` heading, substring |
 | `has:desc` | items with a description block |
 | `text:` | text and description, substring |
-| `sort:` | ordering: `pri` `text` `group` `section` `done`, comma-separated |
+| `due:` | a deadline: `2026-08-01`, `today`, `tomorrow`, `7d`, `none`, with `<=` `>=` `<` `>` |
+| `overdue` | past its deadline and still open |
+| `sort:` | ordering: `pri` `text` `group` `section` `done` `due`, comma-separated |
 
 Adjacent terms are ANDed. `NOT` and a leading `!` both negate. `sort:` is not a
 filter — it orders whatever survives the rest of the query, applying its keys in

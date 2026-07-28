@@ -910,6 +910,7 @@ mod tests {
             section: "P0".to_string(),
             heading: "H".to_string(),
             priority: Priority::P0,
+            due: None,
             parent: None,
             children: Vec::new(),
         }

@@ -18,12 +18,14 @@ pub struct TickerItem {
     pub group: String,
     pub priority: Priority,
     pub text: String,
+    pub overdue: bool,
 }
 
 impl TickerItem {
     fn render(&self) -> String {
+        let flag = if self.overdue { "OVERDUE " } else { "" };
         format!(
-            "[{}] {} · {}",
+            "{flag}[{}] {} · {}",
             self.priority.as_str(),
             self.group,
             self.text
@@ -55,17 +57,19 @@ impl TickerState {
 
     /// Build the queue from a workspace view: open items, most urgent first.
     pub fn fill<'a>(&mut self, items: impl Iterator<Item = (&'a Item, Option<&'a str>)>) {
+        let today = chrono::Local::now().date_naive();
         let mut queue: Vec<TickerItem> = items
             .filter(|(item, _)| !item.done)
             .map(|(item, group)| TickerItem {
                 group: group.unwrap_or("—").to_string(),
                 priority: item.priority,
                 text: item.text.clone(),
+                overdue: item.due.is_some_and(|d| d < today),
             })
             .collect();
-        // `Priority` orders P0 first and `None` last, which is the order the
-        // ticker should cycle in.
-        queue.sort_by_key(|t| t.priority);
+        // Overdue work leads, then priority. `Priority` orders P0 first and
+        // `None` last, which is the order the ticker should cycle in.
+        queue.sort_by_key(|t| (!t.overdue, t.priority));
         self.items = queue;
         self.offset = 0;
     }
@@ -153,6 +157,7 @@ mod tests {
             section: "s".to_string(),
             heading: "h".to_string(),
             priority,
+            due: None,
             parent: None,
             children: Vec::new(),
         }
@@ -175,6 +180,23 @@ mod tests {
         let state = filled();
         assert_eq!(state.items.len(), 2);
         assert!(!state.banner().contains("finished thing"));
+    }
+
+    #[test]
+    fn overdue_work_leads_the_ticker() {
+        let mut late = item("late thing", false, Priority::P3);
+        late.due = Some(chrono::Local::now().date_naive() - chrono::Duration::days(1));
+        let items = [item("urgent but on time", false, Priority::P0), late];
+
+        let mut state = TickerState::new(1);
+        let refs: Vec<(&Item, Option<&str>)> = items.iter().map(|i| (i, Some("g"))).collect();
+        state.fill(refs.into_iter());
+
+        assert!(
+            state.items[0].overdue,
+            "a missed deadline outranks priority"
+        );
+        assert!(state.banner().starts_with("OVERDUE"));
     }
 
     #[test]

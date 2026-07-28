@@ -3,7 +3,9 @@ use std::path::Path;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::config::{PriorityConfig, PrioritySource};
+use chrono::NaiveDate;
+
+use crate::config::{DueConfig, PriorityConfig, PrioritySource};
 
 use super::model::{Item, ItemId, Priority};
 
@@ -66,6 +68,25 @@ fn derive_priority(
         .unwrap_or(Priority::None)
 }
 
+/// Pull a due date out of an item's text, per the configured pattern.
+fn derive_due(matcher: Option<&Regex>, text: &str) -> Option<NaiveDate> {
+    matcher?
+        .captures(text)?
+        .get(1)
+        .and_then(|m| NaiveDate::parse_from_str(m.as_str(), "%Y-%m-%d").ok())
+}
+
+/// Compile a pattern, disabling the feature rather than failing the parse.
+fn compile(pattern: &str, what: &str) -> Option<Regex> {
+    match Regex::new(pattern) {
+        Ok(re) => Some(re),
+        Err(err) => {
+            log::warn!("{what} pattern {pattern:?} is not a valid regex ({err}); disabled");
+            None
+        }
+    }
+}
+
 /// Parse one markdown todo file into items in document order.
 ///
 /// `file_rel` is the workspace-relative path used for id computation, so that
@@ -75,22 +96,18 @@ pub fn parse_todo_file(
     file_rel: &str,
     source: &str,
     priority_config: &PriorityConfig,
+    due_config: &DueConfig,
 ) -> Vec<Item> {
     // Compiled once per file. An unusable pattern disables priorities rather
     // than failing the parse, so a bad config never costs you your todo list.
     let matcher = match priority_config.source {
         PrioritySource::None => None,
-        _ => match Regex::new(&priority_config.pattern) {
-            Ok(re) => Some(re),
-            Err(err) => {
-                log::warn!(
-                    "priority.pattern {:?} is not a valid regex ({err}); priorities disabled",
-                    priority_config.pattern
-                );
-                None
-            }
-        },
+        _ => compile(&priority_config.pattern, "priority"),
     };
+    let due_matcher = due_config
+        .enabled
+        .then(|| compile(&due_config.pattern, "due"))
+        .flatten();
 
     let lines: Vec<&str> = source.lines().collect();
     let start = frontmatter_len(&lines);
@@ -131,6 +148,7 @@ pub fn parse_todo_file(
 
             let priority =
                 derive_priority(matcher.as_ref(), priority_config.source, &section, &text);
+            let due = derive_due(due_matcher.as_ref(), &text);
             let id = ItemId::compute(file_rel, &section, &heading, indent, &text);
             let item = Item {
                 id: id.clone(),
@@ -144,6 +162,7 @@ pub fn parse_todo_file(
                 section: section.clone(),
                 heading: heading.clone(),
                 priority,
+                due,
                 parent: parent_idx.map(|idx| items[idx].id.clone()),
                 children: Vec::new(),
             };
@@ -178,7 +197,9 @@ pub fn parse_todo_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PriorityConfig, PrioritySource};
+    use chrono::NaiveDate;
+
+    use crate::config::{DueConfig, PriorityConfig, PrioritySource};
     use std::path::Path;
 
     fn heading_config() -> PriorityConfig {
@@ -195,6 +216,7 @@ mod tests {
             "lefv/TODO.md",
             source,
             &heading_config(),
+            &DueConfig::default(),
         )
     }
 
@@ -217,7 +239,7 @@ mod tests {
             pattern: "^P([0-3])".to_string(),
         };
         let source = include_str!("../../tests/fixtures/basic/TODO.md");
-        let items = parse_todo_file(Path::new("f"), "f", source, &cfg);
+        let items = parse_todo_file(Path::new("f"), "f", source, &cfg, &DueConfig::default());
         assert!(
             items.iter().all(|i| i.priority == Priority::None),
             "source = none must mean no priorities, whatever the headings say"
@@ -231,7 +253,7 @@ mod tests {
             pattern: r"\(([A-D])\)".to_string(),
         };
         let doc = "## Anything\n\n- [ ] (A) urgent thing\n- [ ] (C) later thing\n- [ ] untagged\n";
-        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg, &DueConfig::default());
         assert_eq!(items[0].priority, Priority::P0, "(A) is the top band");
         assert_eq!(items[1].priority, Priority::P2, "(C) is the third band");
         assert_eq!(items[2].priority, Priority::None, "untagged");
@@ -244,7 +266,7 @@ mod tests {
             pattern: r"prio-([0-3])".to_string(),
         };
         let doc = "## prio-1 things\n\n- [ ] a\n";
-        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg, &DueConfig::default());
         assert_eq!(items[0].priority, Priority::P1);
     }
 
@@ -255,8 +277,69 @@ mod tests {
             pattern: "([unclosed".to_string(),
         };
         let doc = "## P0 — Critical\n\n- [ ] a\n";
-        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg, &DueConfig::default());
         assert_eq!(items[0].priority, Priority::None);
+    }
+
+    fn due_items(doc: &str, due: &DueConfig) -> Vec<Item> {
+        parse_todo_file(Path::new("f"), "f", doc, &PriorityConfig::default(), due)
+    }
+
+    #[test]
+    fn reads_an_iso_due_date_out_of_the_item_text() {
+        let items = due_items(
+            "- [ ] file the brief due:2026-08-01\n",
+            &DueConfig::default(),
+        );
+        assert_eq!(
+            items[0].due,
+            Some(NaiveDate::from_ymd_opt(2026, 8, 1).unwrap())
+        );
+    }
+
+    #[test]
+    fn items_without_a_date_have_none() {
+        let items = due_items("- [ ] no deadline here\n", &DueConfig::default());
+        assert_eq!(items[0].due, None);
+    }
+
+    #[test]
+    fn an_unparseable_date_is_ignored_rather_than_guessed() {
+        let items = due_items("- [ ] due:2026-13-45\n", &DueConfig::default());
+        assert_eq!(items[0].due, None, "month 13 is not a date");
+    }
+
+    #[test]
+    fn a_custom_due_pattern_is_honoured() {
+        let cfg = DueConfig {
+            enabled: true,
+            pattern: r"\(due (\d{4}-\d{2}-\d{2})\)".to_string(),
+        };
+        let items = due_items("- [ ] hearing (due 2026-09-15)\n", &cfg);
+        assert_eq!(
+            items[0].due,
+            Some(NaiveDate::from_ymd_opt(2026, 9, 15).unwrap())
+        );
+    }
+
+    #[test]
+    fn due_dates_can_be_turned_off() {
+        let cfg = DueConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let items = due_items("- [ ] thing due:2026-08-01\n", &cfg);
+        assert_eq!(items[0].due, None);
+    }
+
+    #[test]
+    fn an_invalid_due_pattern_disables_dates_rather_than_panicking() {
+        let cfg = DueConfig {
+            enabled: true,
+            pattern: "([unclosed".to_string(),
+        };
+        let items = due_items("- [ ] thing due:2026-08-01\n", &cfg);
+        assert_eq!(items[0].due, None);
     }
 
     #[test]

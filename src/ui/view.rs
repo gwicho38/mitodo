@@ -4,7 +4,24 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use chrono::Local;
+
 use super::{App, Focus, Mode, chyron, viewport_start};
+
+/// Short deadline marker, and whether it is already past.
+fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
+    let due = item.due?;
+    let today = Local::now().date_naive();
+    let overdue = due < today && !item.done;
+    let label = match (due - today).num_days() {
+        0 => "today".to_string(),
+        1 => "tmrw".to_string(),
+        d if d < 0 => format!("{}d ago", -d),
+        d if d <= 99 => format!("{d}d"),
+        _ => due.format("%m-%d").to_string(),
+    };
+    Some((label, overdue))
+}
 
 /// The horizontal bands of the screen, top to bottom.
 ///
@@ -231,16 +248,25 @@ fn render_items(app: &App, frame: &mut Frame, area: Rect) {
                 style = theme.selected(&style);
             }
             let mark = if item.done { "x" } else { " " };
-            Line::from(Span::styled(
+            let mut spans = vec![Span::styled(
                 format!(
-                    "{}{}[{mark}] {:<3} {}",
+                    "{}{}[{mark}] {:<3} ",
                     if selected { "▸ " } else { "  " },
                     " ".repeat(item.indent),
                     item.priority.as_str(),
-                    item.text
                 ),
                 style,
-            ))
+            )];
+            if let Some((label, overdue)) = due_label(item) {
+                let due_style = if overdue {
+                    theme.flagged(&style)
+                } else {
+                    theme.highlighted(&style)
+                };
+                spans.push(Span::styled(format!("{label:<7} "), due_style));
+            }
+            spans.push(Span::styled(item.text.clone(), style));
+            Line::from(spans)
         })
         .collect();
 
@@ -269,12 +295,21 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
                 Line::from(Span::styled(item.text.clone(), theme.header())),
                 Line::from(""),
                 Line::from(Span::styled(
-                    format!(
-                        "{} · {} · {}",
-                        item.priority.as_str(),
-                        item.section,
-                        item.heading
-                    ),
+                    match item.due {
+                        Some(due) => format!(
+                            "{} · due {} · {} · {}",
+                            item.priority.as_str(),
+                            due.format("%Y-%m-%d"),
+                            item.section,
+                            item.heading
+                        ),
+                        None => format!(
+                            "{} · {} · {}",
+                            item.priority.as_str(),
+                            item.section,
+                            item.heading
+                        ),
+                    },
                     theme.paragraph(),
                 )),
             ];
@@ -377,6 +412,7 @@ mod tests {
             section: "P0 — Critical".to_string(),
             heading: "H".to_string(),
             priority: Priority::P0,
+            due: None,
             parent: None,
             children: Vec::new(),
         }
@@ -417,6 +453,58 @@ mod tests {
 
     fn draw(width: u16, height: u16) -> Vec<String> {
         draw_app(&test_app(), width, height)
+    }
+
+    fn with_due(app: &mut App, index: usize, offset_days: i64) {
+        app.workspace.items[index].due =
+            Some(Local::now().date_naive() + chrono::Duration::days(offset_days));
+    }
+
+    #[test]
+    fn a_deadline_is_shown_beside_the_item() {
+        let mut app = test_app();
+        with_due(&mut app, 0, 0);
+        assert!(draw_app(&app, 90, 24).join("\n").contains("today"));
+
+        let mut app = test_app();
+        with_due(&mut app, 0, 1);
+        assert!(draw_app(&app, 90, 24).join("\n").contains("tmrw"));
+
+        let mut app = test_app();
+        with_due(&mut app, 0, 5);
+        assert!(draw_app(&app, 90, 24).join("\n").contains("5d"));
+    }
+
+    #[test]
+    fn a_missed_deadline_reads_as_overdue() {
+        let mut app = test_app();
+        with_due(&mut app, 0, -3);
+        assert!(
+            draw_app(&app, 90, 24).join("\n").contains("3d ago"),
+            "how late it is, not just that it is late"
+        );
+    }
+
+    #[test]
+    fn items_without_a_deadline_get_no_column() {
+        let app = test_app();
+        let rows = draw_app(&app, 90, 24).join("\n");
+        assert!(
+            rows.contains("[ ] P0  file the 83(b)"),
+            "text follows priority"
+        );
+    }
+
+    #[test]
+    fn the_detail_pane_spells_the_deadline_out_in_full() {
+        let mut app = test_app();
+        with_due(&mut app, 0, 0);
+        let expected = Local::now().date_naive().format("%Y-%m-%d").to_string();
+        assert!(
+            draw_app(&app, 90, 24)
+                .join("\n")
+                .contains(&format!("due {expected}"))
+        );
     }
 
     #[test]
