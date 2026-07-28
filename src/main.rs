@@ -23,7 +23,7 @@ fn main() -> Result<()> {
 
     match args.command() {
         Some(Command::Init { root, force }) => cmd_init(root, *force, &config_path),
-        Some(Command::List) => Err(eyre!("`list` arrives in Task 8")),
+        Some(Command::List) => cmd_list(&config_path),
         None => Err(eyre!("no subcommand given; try `mitodo --help`")),
     }
 }
@@ -43,5 +43,31 @@ fn cmd_init(root: &PathBuf, force: bool, config_path: &Path) -> Result<()> {
     }
     found.config.save(config_path)?;
     println!("wrote {}", config_path.display());
+    Ok(())
+}
+
+fn cmd_list(config_path: &Path) -> Result<()> {
+    let config = config::Config::load(config_path)?;
+    let workspace = store::Workspace::load(&config)?;
+
+    for group in &workspace.groups {
+        let items = workspace.items_for_group(&group.name);
+        let open = items.iter().filter(|i| !i.done).count();
+        println!("\n{} ({} open / {} total)", group.name, open, items.len());
+        for item in items {
+            let box_ = if item.done { "x" } else { " " };
+            let indent = " ".repeat(item.indent);
+            println!(
+                "  {indent}[{box_}] {:<3} {}",
+                item.priority.as_str(),
+                item.text
+            );
+        }
+    }
+    println!(
+        "\n{} open across {} groups",
+        workspace.open_count(),
+        workspace.groups.len()
+    );
     Ok(())
 }
