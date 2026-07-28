@@ -126,6 +126,15 @@ impl App {
         }
     }
 
+    /// Apply a query supplied on the command line.
+    pub fn set_query(&mut self, text: &str) -> Result<(), crate::query::QueryError> {
+        self.query = Query::parse(text)?;
+        self.query_input = text.to_string();
+        let len = self.visible_items().len();
+        self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+        Ok(())
+    }
+
     /// Give the app a channel so background tasks can report back.
     pub fn with_sender(mut self, sender: UnboundedSender<Msg>) -> Self {
         self.sender = Some(sender);

@@ -10,6 +10,7 @@ mod query;
 mod store;
 mod ui;
 
+use std::io::{self, Write};
 use std::path::Path;
 
 use clap::Parser;
@@ -31,10 +32,11 @@ async fn main() -> Result<()> {
         None => config::default_config_path()?,
     };
 
+    let query = args.effective_query();
     match args.command() {
         Some(Command::Init { root, force }) => cmd_init(root, *force, &config_path),
-        Some(Command::List) => cmd_list(&config_path),
-        None => run_tui(&config_path).await,
+        Some(Command::List) => cmd_list(&config_path, query.as_deref()),
+        None => run_tui(&config_path, query.as_deref()).await,
     }
 }
 
@@ -56,33 +58,88 @@ fn cmd_init(root: &Path, force: bool, config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(config_path: &Path) -> Result<()> {
+/// True if the error is a closed downstream pipe, e.g. `mitodo list | head`.
+///
+/// `println!` panics on EPIPE, which makes piping into `head` look like a
+/// crash. Writing explicitly lets us treat it as the normal end of output.
+fn is_broken_pipe(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::BrokenPipe
+}
+
+fn cmd_list(config_path: &Path, query: Option<&str>) -> Result<()> {
     let config = config::Config::load(config_path)?;
     let workspace = store::Workspace::load(&config)?;
+    let query = parse_query(query)?;
 
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
+    match write_list(&mut out, &workspace, query.as_ref()) {
+        Err(err) if is_broken_pipe(&err) => Ok(()),
+        other => Ok(other?),
+    }
+}
+
+fn write_list(
+    out: &mut impl Write,
+    workspace: &store::Workspace,
+    query: Option<&query::Query>,
+) -> io::Result<()> {
+    let mut shown = 0usize;
     for group in &workspace.groups {
-        let items = workspace.items_for_group(&group.name);
+        let items: Vec<_> = workspace
+            .items_for_group(&group.name)
+            .into_iter()
+            .filter(|item| match query {
+                Some(q) => q.matches(item, workspace.group_name_for(item)),
+                None => true,
+            })
+            .collect();
+        if items.is_empty() && query.is_some() {
+            continue;
+        }
+        shown += items.len();
         let open = items.iter().filter(|i| !i.done).count();
-        println!("\n{} ({} open / {} total)", group.name, open, items.len());
+        writeln!(
+            out,
+            "\n{} ({} open / {} total)",
+            group.name,
+            open,
+            items.len()
+        )?;
         for item in items {
             let box_ = if item.done { "x" } else { " " };
             let indent = " ".repeat(item.indent);
-            println!(
+            writeln!(
+                out,
                 "  {indent}[{box_}] {:<3} {}",
                 item.priority.as_str(),
                 item.text
-            );
+            )?;
         }
     }
-    println!(
-        "\n{} open across {} groups",
-        workspace.open_count(),
-        workspace.groups.len()
-    );
+    match query {
+        Some(_) => writeln!(out, "\n{shown} matching item(s)")?,
+        None => writeln!(
+            out,
+            "\n{} open across {} groups",
+            workspace.open_count(),
+            workspace.groups.len()
+        )?,
+    }
     Ok(())
 }
 
-async fn run_tui(config_path: &Path) -> Result<()> {
+/// Parse a CLI query, turning a syntax error into a readable failure rather
+/// than silently showing everything.
+fn parse_query(query: Option<&str>) -> Result<Option<query::Query>> {
+    match query {
+        None => Ok(None),
+        Some(text) => query::Query::parse(text).map_err(|err| eyre!("bad query: {err}")),
+    }
+}
+
+async fn run_tui(config_path: &Path, query: Option<&str>) -> Result<()> {
     let config = config::Config::load(config_path)
         .map_err(|e| eyre!("{e}\n\nrun `mitodo init <workspace>` first to create a config file"))?;
     let workspace = store::Workspace::load(&config)?;
@@ -136,7 +193,11 @@ async fn run_tui(config_path: &Path) -> Result<()> {
     });
 
     let terminal = ratatui::init();
-    let app = ui::App::new(workspace, config).with_sender(app_sender);
+    let mut app = ui::App::new(workspace, config).with_sender(app_sender);
+    if let Some(text) = query {
+        app.set_query(text)
+            .map_err(|err| eyre!("bad query: {err}"))?;
+    }
     let result = app.run(message_receiver, terminal).await;
     ratatui::restore();
 
