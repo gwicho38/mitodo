@@ -20,13 +20,13 @@ pub enum WriteError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineEnding {
+pub(super) enum LineEnding {
     Lf,
     Crlf,
 }
 
 impl LineEnding {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             LineEnding::Lf => "\n",
             LineEnding::Crlf => "\r\n",
@@ -38,7 +38,7 @@ impl LineEnding {
 ///
 /// Returns the lines without their terminators, the dominant line ending, and
 /// whether the file ended with a terminator.
-fn read_lines(path: &Path) -> Result<(Vec<String>, LineEnding, bool), WriteError> {
+pub(super) fn read_lines(path: &Path) -> Result<(Vec<String>, LineEnding, bool), WriteError> {
     let text = std::fs::read_to_string(path)?;
     let ending = if text.contains("\r\n") {
         LineEnding::Crlf
@@ -63,7 +63,7 @@ fn read_lines(path: &Path) -> Result<(Vec<String>, LineEnding, bool), WriteError
 }
 
 /// Write lines back atomically: temp file in the same directory, then rename.
-fn write_lines(
+pub(super) fn write_lines(
     path: &Path,
     lines: &[String],
     ending: LineEnding,
@@ -87,7 +87,12 @@ fn write_lines(
 /// Fetch a line, verifying it still holds what the caller parsed.
 ///
 /// This is the guard that makes concurrent editing by other tools safe.
-fn verify(path: &Path, lines: &[String], line: usize, expected: &str) -> Result<(), WriteError> {
+pub(super) fn verify(
+    path: &Path,
+    lines: &[String],
+    line: usize,
+    expected: &str,
+) -> Result<(), WriteError> {
     let found = lines.get(line).ok_or_else(|| WriteError::LineOutOfRange {
         file: path.display().to_string(),
         line,

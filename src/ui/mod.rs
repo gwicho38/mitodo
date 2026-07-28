@@ -17,6 +17,7 @@ use crate::store::Workspace;
 use crate::store::model::{Group, Item};
 use crate::store::{self, WriteError};
 use chyron::TickerState;
+use std::path::PathBuf;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Which pane takes keyboard input.
@@ -36,6 +37,8 @@ pub enum Mode {
     Editing(EditKind),
     /// Waiting for y/n on a destructive action.
     ConfirmingDelete,
+    /// Waiting for y/n before archiving finished items.
+    ConfirmingArchive,
     /// Showing scrollable output; any key dismisses.
     Modal,
     /// Showing a proposed change-set; y applies, anything else discards.
@@ -246,6 +249,12 @@ impl App {
             Mode::EditingQuery => self.handle_query_key(key),
             Mode::Editing(kind) => self.handle_edit_key(key, kind),
             Mode::ConfirmingDelete => self.handle_confirm_key(key),
+            Mode::ConfirmingArchive => {
+                self.mode = Mode::Normal;
+                if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+                    self.archive_done();
+                }
+            }
             Mode::Modal => {
                 self.mode = Mode::Normal;
                 self.modal = None;
@@ -398,6 +407,7 @@ impl App {
             }
             (K::Char('?'), _) => self.open_modal("keys", help_lines()),
             (K::Char('N'), KeyModifiers::SHIFT) => self.show_notes(),
+            (K::Char('X'), KeyModifiers::SHIFT) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
             (K::Char('S'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Summarize, String::new()),
             (K::Char('b'), KeyModifiers::NONE) => match self.selected_item() {
@@ -586,6 +596,42 @@ impl App {
             .map(|item| (item, self.workspace.group_name_for(item)))
             .collect();
         ticker.fill(entries.into_iter());
+    }
+
+    /// Ask before archiving, since it rewrites two files at once.
+    fn begin_archive(&mut self) {
+        match self.archive_target() {
+            Some(_) => self.mode = Mode::ConfirmingArchive,
+            None => {
+                self.notice =
+                    Some("select a group with an archive directory configured".to_string())
+            }
+        }
+    }
+
+    /// The selected group's todo and archive paths, if archiving is possible.
+    fn archive_target(&self) -> Option<(PathBuf, PathBuf)> {
+        let group = self.selected_group()?;
+        let archive = group.archive_dir.clone()?;
+        Some((group.todo_file.clone(), archive))
+    }
+
+    fn archive_done(&mut self) {
+        let Some((todo_file, archive_dir)) = self.archive_target() else {
+            return;
+        };
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let items = self.workspace.items.clone();
+
+        match store::archive_done(&todo_file, &archive_dir, &items, &date) {
+            Ok(report) => {
+                self.reload();
+                let mut body = vec![format!("archived {} item(s)", report.archived)];
+                body.extend(report.skipped.iter().map(|s| format!("skipped: {s}")));
+                self.open_modal("archive", body);
+            }
+            Err(err) => self.notice = Some(format!("archive failed: {err}")),
+        }
     }
 
     /// Show the selected group's notes sidecar.
@@ -783,6 +829,7 @@ fn help_lines() -> Vec<String> {
         "",
         "groups",
         "  N  read the selected group's notes.md",
+        "  X  archive finished items into _archive/",
         "  +/-  faster/slower",
         "",
         "  ?  this help          q  quit",
@@ -1237,6 +1284,60 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn shift_x_archives_finished_items_after_confirmation() {
+        let (dir, mut app) = disk_app(DOC);
+        app.config.workspace.archive_dir = Some("_archive".to_string());
+        std::fs::create_dir_all(dir.path().join("lefv/_archive")).unwrap();
+        app.reload();
+
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('j')); // select "lefv"
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(app.mode, Mode::ConfirmingArchive);
+        assert_eq!(read(&app), DOC, "nothing moved before confirmation");
+
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n",
+            "beta moved out"
+        );
+        let archived = std::fs::read_to_string(dir.path().join("lefv/_archive/TODO.md")).unwrap();
+        assert!(archived.contains("- [x] beta"), "and moved in");
+    }
+
+    #[test]
+    fn declining_the_archive_prompt_changes_nothing() {
+        let (dir, mut app) = disk_app(DOC);
+        app.config.workspace.archive_dir = Some("_archive".to_string());
+        std::fs::create_dir_all(dir.path().join("lefv/_archive")).unwrap();
+        app.reload();
+
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('j'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC);
+    }
+
+    #[test]
+    fn archiving_needs_a_group_and_a_configured_archive_dir() {
+        let (_d, mut app) = disk_app(DOC);
+        // "all" is selected, and no archive_dir is configured.
+        app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("archive directory"),
+            "got {:?}",
+            app.notice
         );
     }
 

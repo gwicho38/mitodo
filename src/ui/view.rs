@@ -329,6 +329,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             " delete this item? y / n ".to_string(),
             theme.tooltip_warning(),
         )),
+        (None, None, Mode::ConfirmingArchive) => Line::from(Span::styled(
+            " move finished items into _archive/? y / n ".to_string(),
+            theme.tooltip_warning(),
+        )),
         (None, None, Mode::ReviewingChangeSet) => Line::from(Span::styled(
             " apply this change-set? y / n ".to_string(),
             theme.tooltip_warning(),
