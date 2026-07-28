@@ -3,5 +3,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod model;
+pub mod parse;
 
 pub use model::{Group, Item, ItemId, Priority};
+pub use parse::parse_todo_file;
