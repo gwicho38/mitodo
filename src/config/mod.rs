@@ -2,6 +2,7 @@
 // only the tests exercise it. Drop this once the TUI consumes the full API.
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,10 @@ pub struct Config {
     pub priority: PriorityConfig,
     #[serde(default)]
     pub git: GitConfig,
+    /// Omitted from a written config when unconfigured, so `init` does not
+    /// leave an empty section that a later append would duplicate.
+    #[serde(default, skip_serializing_if = "AgentConfig::is_disabled")]
+    pub agent: AgentConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -72,6 +77,29 @@ pub enum PrioritySource {
     Tag,
     #[default]
     None,
+}
+
+/// How to invoke an external agent. Any binary that takes a prompt and emits
+/// JSON works; nothing about a particular provider is baked in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentConfig {
+    /// Argv prefix, e.g. `["claude", "--print"]`. Empty disables the feature.
+    #[serde(default)]
+    pub command: Vec<String>,
+    /// Flag the schema is passed behind, if the tool supports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_flag: Option<String>,
+    /// Paths to prompt templates, keyed by verb. Missing verbs use the
+    /// built-in prompt, so a personal template (naming your own sources) stays
+    /// local rather than shipping in the repository.
+    #[serde(default)]
+    pub prompts: HashMap<String, PathBuf>,
+}
+
+impl AgentConfig {
+    pub fn is_disabled(&self) -> bool {
+        self.command.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -142,6 +170,39 @@ pattern = "^P([0-3])"
 enabled = true
 sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"]]
 "#;
+
+    #[test]
+    fn an_unconfigured_agent_is_not_written_out() {
+        let cfg: Config = toml::from_str(SAMPLE).unwrap();
+        let rendered = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !rendered.contains("[agent"),
+            "an empty agent section would make a later append invalid TOML:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn agent_defaults_to_disabled() {
+        let cfg: Config = toml::from_str(SAMPLE).unwrap();
+        assert!(cfg.agent.command.is_empty(), "no agent unless configured");
+    }
+
+    #[test]
+    fn parses_an_agent_section() {
+        let with_agent = format!(
+            "{SAMPLE}\n[agent]\ncommand = [\"claude\", \"--print\"]\nschema_flag = \"--json-schema\"\n\n[agent.prompts]\nscan = \"/tmp/scan.md\"\n"
+        );
+        let cfg: Config = toml::from_str(&with_agent).expect("agent config parses");
+        assert_eq!(cfg.agent.command, vec!["claude", "--print"]);
+        assert_eq!(cfg.agent.schema_flag.as_deref(), Some("--json-schema"));
+        assert_eq!(
+            cfg.agent
+                .prompts
+                .get("scan")
+                .map(|p| p.to_string_lossy().to_string()),
+            Some("/tmp/scan.md".to_string())
+        );
+    }
 
     #[test]
     fn parses_a_full_config() {

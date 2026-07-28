@@ -1,5 +1,7 @@
+mod agent;
 mod cli;
 mod config;
+mod git;
 mod input;
 mod logging;
 mod messages;
@@ -91,6 +93,7 @@ async fn run_tui(config_path: &Path) -> Result<()> {
     );
 
     let (message_sender, message_receiver) = unbounded_channel::<Message>();
+    let app_sender = message_sender.clone();
 
     // Watch the workspace so edits by Claude, mcli or todos-mcp show up
     // without a restart. Blocking, so it gets its own thread.
@@ -117,7 +120,7 @@ async fn run_tui(config_path: &Path) -> Result<()> {
     });
 
     let terminal = ratatui::init();
-    let app = ui::App::new(workspace, config);
+    let app = ui::App::new(workspace, config).with_sender(app_sender);
     let result = app.run(message_receiver, terminal).await;
     ratatui::restore();
 

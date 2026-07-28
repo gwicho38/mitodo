@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use super::{App, Focus, Mode, viewport_start};
 
@@ -53,7 +53,10 @@ pub fn split(area: Rect, command_line_visible: bool) -> Frames {
 /// Render the whole screen. Kept free of I/O so it can be exercised headlessly
 /// against a `TestBackend`.
 pub fn render(app: &App, frame: &mut Frame) {
-    let editing = matches!(app.mode, Mode::EditingQuery | Mode::Editing(_));
+    let editing = matches!(
+        app.mode,
+        Mode::EditingQuery | Mode::Editing(_) | Mode::AskingAgent(_)
+    );
     let f = split(frame.area(), editing);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
@@ -63,12 +66,53 @@ pub fn render(app: &App, frame: &mut Frame) {
         render_command_line(app, frame, f.command_line);
     }
     render_status(app, frame, f.status);
+    render_overlay(app, frame, frame.area());
+}
+
+/// Modal and change-set review share one centred overlay.
+fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    let (title, body) = match (&app.modal, &app.pending, app.mode) {
+        (_, Some(set), Mode::ReviewingChangeSet) => {
+            ("review change-set".to_string(), set.review_lines())
+        }
+        (Some((title, body)), _, Mode::Modal) => (title.clone(), body.clone()),
+        _ => return,
+    };
+
+    let width = area.width.saturating_sub(8).clamp(20, 100);
+    let height = (body.len() as u16 + 2)
+        .min(area.height.saturating_sub(4))
+        .max(3);
+    let popup = Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    };
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(
+            body.iter()
+                .map(|l| Line::from(Span::styled(l.clone(), theme.paragraph())))
+                .collect::<Vec<_>>(),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title(title),
+        ),
+        popup,
+    );
 }
 
 fn render_command_line(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
     let (prefix, text) = match app.mode {
         Mode::Editing(kind) => (format!("{}: ", kind.prompt()), app.edit_buffer.clone()),
+        Mode::AskingAgent(verb) => (format!("{}: ", verb.label()), app.edit_buffer.clone()),
         _ => ("/".to_string(), app.query_input.clone()),
     };
     frame.render_widget(
@@ -101,6 +145,9 @@ fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
     ];
     if app.hide_done {
         spans.push(Span::styled(" !done ", theme.query()));
+    }
+    if let Some(busy) = &app.busy {
+        spans.push(Span::styled(format!(" ⣟ {busy}… "), theme.tooltip_info()));
     }
     if !app.query_input.is_empty() && app.query.is_some() {
         spans.push(Span::styled(
@@ -273,8 +320,21 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             " delete this item? y / n ".to_string(),
             theme.tooltip_warning(),
         )),
+        (None, None, Mode::ReviewingChangeSet) => Line::from(Span::styled(
+            " apply this change-set? y / n ".to_string(),
+            theme.tooltip_warning(),
+        )),
+        (None, None, Mode::Modal) => Line::from(Span::styled(
+            " any key to dismiss ".to_string(),
+            theme.statusbar(),
+        )),
+        (None, None, Mode::AskingAgent(_)) => Line::from(Span::styled(
+            " enter run · esc cancel ".to_string(),
+            theme.statusbar(),
+        )),
         (None, None, Mode::Normal) => Line::from(Span::styled(
-            " space toggle · a add · e edit · i desc · d del · / query · q quit ".to_string(),
+            " space toggle · a add · e edit · d del · / query · s sync · ? keys · q quit "
+                .to_string(),
             theme.statusbar(),
         )),
     };

@@ -4,14 +4,18 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::agent::{self, ChangeSet, Verb};
 use crate::config::Config;
 use crate::config::Theme;
+use crate::git;
+use crate::messages::Message as Msg;
 use crate::messages::{Event, Message};
 use crate::prelude::*;
 use crate::query::Query;
 use crate::store::Workspace;
 use crate::store::model::{Group, Item};
 use crate::store::{self, WriteError};
+use tokio::sync::mpsc::UnboundedSender;
 
 /// Which pane takes keyboard input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,12 @@ pub enum Mode {
     Editing(EditKind),
     /// Waiting for y/n on a destructive action.
     ConfirmingDelete,
+    /// Showing scrollable output; any key dismisses.
+    Modal,
+    /// Showing a proposed change-set; y applies, anything else discards.
+    ReviewingChangeSet,
+    /// Typing the input for an agent verb.
+    AskingAgent(Verb),
 }
 
 /// What the text currently being typed will become.
@@ -76,6 +86,13 @@ pub struct App {
     pub edit_buffer: String,
     /// Outcome of the last write, shown in the status bar.
     pub notice: Option<String>,
+    /// Title and body of the modal, when one is open.
+    pub modal: Option<(String, Vec<String>)>,
+    /// Change-set awaiting review.
+    pub pending: Option<ChangeSet>,
+    /// Label of a background task in flight.
+    pub busy: Option<String>,
+    sender: Option<UnboundedSender<Msg>>,
     config: Config,
     should_quit: bool,
 }
@@ -96,8 +113,18 @@ impl App {
             query_error: None,
             edit_buffer: String::new(),
             notice: None,
+            modal: None,
+            pending: None,
+            busy: None,
+            sender: None,
             should_quit: false,
         }
+    }
+
+    /// Give the app a channel so background tasks can report back.
+    pub fn with_sender(mut self, sender: UnboundedSender<Msg>) -> Self {
+        self.sender = Some(sender);
+        self
     }
 
     /// The selected group, or `None` when "all" is selected.
@@ -155,6 +182,20 @@ impl App {
             // A redraw follows every message, so a resize needs no handling.
             Message::Event(Event::Resized(..)) => {}
             Message::Event(Event::Mouse(_)) => {}
+            Message::Event(Event::TaskFinished { title, body }) => {
+                self.busy = None;
+                self.open_modal(&title, body.lines().map(|l| l.to_string()).collect());
+            }
+            Message::Event(Event::QueryProposed(text)) => {
+                self.busy = None;
+                self.query_input = text;
+                self.apply_query();
+            }
+            Message::Event(Event::ChangeSetProposed(set)) => {
+                self.busy = None;
+                self.pending = Some(set);
+                self.mode = Mode::ReviewingChangeSet;
+            }
             Message::Event(Event::WorkspaceReloaded) => {
                 // Don't stomp on a half-typed edit; the reload lands when the
                 // user finishes. Only announce a change that is actually
@@ -177,6 +218,48 @@ impl App {
             Mode::EditingQuery => self.handle_query_key(key),
             Mode::Editing(kind) => self.handle_edit_key(key, kind),
             Mode::ConfirmingDelete => self.handle_confirm_key(key),
+            Mode::Modal => {
+                self.mode = Mode::Normal;
+                self.modal = None;
+            }
+            Mode::ReviewingChangeSet => self.handle_review_key(key),
+            Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
+        }
+    }
+
+    fn handle_review_key(&mut self, key: KeyEvent) {
+        self.mode = Mode::Normal;
+        let Some(set) = self.pending.take() else {
+            return;
+        };
+        if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+            self.notice = Some("change-set discarded".to_string());
+            return;
+        }
+        let report = agent::changeset::apply(&self.workspace.root, &self.workspace.items, &set);
+        self.reload();
+        let mut body = vec![format!("applied {} change(s)", report.applied)];
+        body.extend(report.skipped.iter().map(|s| format!("skipped: {s}")));
+        self.open_modal("apply", body);
+    }
+
+    fn handle_ask_key(&mut self, key: KeyEvent, verb: Verb) {
+        use KeyCode as K;
+        match key.code {
+            K::Esc => {
+                self.mode = Mode::Normal;
+                self.edit_buffer.clear();
+            }
+            K::Enter => {
+                let input = std::mem::take(&mut self.edit_buffer);
+                self.mode = Mode::Normal;
+                self.spawn_agent(verb, input);
+            }
+            K::Backspace => {
+                self.edit_buffer.pop();
+            }
+            K::Char(c) => self.edit_buffer.push(c),
+            _ => {}
         }
     }
 
@@ -268,6 +351,18 @@ impl App {
             (K::Char('A'), KeyModifiers::SHIFT) => self.begin_edit(EditKind::AddChild, false),
             (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
             (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
+            (K::Char('s'), KeyModifiers::NONE) => self.spawn_git_sync(),
+            (K::Char('?'), _) => self.open_modal("keys", help_lines()),
+            (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
+            (K::Char('S'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Summarize, String::new()),
+            (K::Char('b'), KeyModifiers::NONE) => match self.selected_item() {
+                Some(item) => {
+                    let text = item.text.clone();
+                    self.spawn_agent(Verb::Breakdown, text)
+                }
+                None => self.notice = Some("no item selected".to_string()),
+            },
+            (K::Char('R'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Scan, String::new()),
             (K::Char('d'), KeyModifiers::NONE) => {
                 if self.selected_item().is_some() {
                     self.mode = Mode::ConfirmingDelete;
@@ -419,6 +514,103 @@ impl App {
         self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
     }
 
+    fn open_modal(&mut self, title: &str, body: Vec<String>) {
+        self.modal = Some((title.to_string(), body));
+        self.mode = Mode::Modal;
+    }
+
+    fn begin_ask(&mut self, verb: Verb) {
+        if self.config.agent.command.is_empty() {
+            self.notice = Some("no agent configured (set [agent] command)".to_string());
+            return;
+        }
+        self.edit_buffer.clear();
+        self.mode = Mode::AskingAgent(verb);
+    }
+
+    /// Everything the agent needs about the current view, as plain text.
+    fn items_context(&self) -> String {
+        self.visible_items()
+            .iter()
+            .map(|i| {
+                format!(
+                    "- [{}] {} ({})",
+                    if i.done { "x" } else { " " },
+                    i.text,
+                    i.priority.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Prompt template for a verb: the configured file if present and readable,
+    /// otherwise the built-in.
+    fn prompt_template(&self, verb: Verb) -> String {
+        self.config
+            .agent
+            .prompts
+            .get(verb.label())
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_else(|| verb.default_prompt().to_string())
+    }
+
+    fn spawn_git_sync(&mut self) {
+        if !self.config.git.enabled {
+            self.notice = Some("git sync is disabled in config".to_string());
+            return;
+        }
+        let (Some(sender), root, commands) = (
+            self.sender.clone(),
+            self.workspace.root.clone(),
+            self.config.git.sync.clone(),
+        ) else {
+            return;
+        };
+        self.busy = Some("git sync".to_string());
+        std::thread::spawn(move || {
+            let outcome = git::run_sync(&root, &commands, "git");
+            let _ = sender.send(Msg::Event(Event::TaskFinished {
+                title: format!("git sync ({})", if outcome.ok { "ok" } else { "failed" }),
+                body: outcome.transcript,
+            }));
+        });
+    }
+
+    fn spawn_agent(&mut self, verb: Verb, input: String) {
+        if self.config.agent.command.is_empty() {
+            self.notice = Some("no agent configured (set [agent] command)".to_string());
+            return;
+        }
+        let Some(sender) = self.sender.clone() else {
+            return;
+        };
+        let prompt =
+            agent::render_prompt(&self.prompt_template(verb), &input, &self.items_context());
+        let command = self.config.agent.command.clone();
+        let schema_flag = self.config.agent.schema_flag.clone();
+        let root = self.workspace.root.clone();
+
+        self.busy = Some(verb.label().to_string());
+        std::thread::spawn(move || {
+            let result = agent::run(
+                &command,
+                schema_flag.as_deref(),
+                verb.schema(),
+                &prompt,
+                &root,
+            );
+            let event = match result {
+                Err(err) => Event::TaskFinished {
+                    title: format!("{} failed", verb.label()),
+                    body: err.to_string(),
+                },
+                Ok(json) => interpret(verb, &json),
+            };
+            let _ = sender.send(Msg::Event(event));
+        });
+    }
+
     fn clear_query(&mut self) {
         self.query = None;
         self.query_input.clear();
@@ -433,6 +625,67 @@ impl App {
         let len = self.visible_items().len();
         self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
     }
+}
+
+/// Turn an agent's JSON reply into the event that acts on it.
+fn interpret(verb: Verb, json: &str) -> Event {
+    match verb {
+        Verb::Query => match agent::field(json, "query") {
+            Ok(query) => Event::QueryProposed(query),
+            Err(err) => fail(verb, err.to_string()),
+        },
+        Verb::Summarize => match agent::field(json, "brief") {
+            Ok(brief) => Event::TaskFinished {
+                title: "summary".to_string(),
+                body: brief,
+            },
+            Err(err) => fail(verb, err.to_string()),
+        },
+        Verb::Breakdown => match agent::string_list(json, "sub_items") {
+            Ok(items) => Event::TaskFinished {
+                title: "proposed sub-items".to_string(),
+                body: items.join("\n"),
+            },
+            Err(err) => fail(verb, err.to_string()),
+        },
+        Verb::Scan => match ChangeSet::parse(json) {
+            Ok(set) => Event::ChangeSetProposed(set),
+            Err(err) => fail(verb, err.to_string()),
+        },
+    }
+}
+
+fn fail(verb: Verb, body: String) -> Event {
+    Event::TaskFinished {
+        title: format!("{} failed", verb.label()),
+        body,
+    }
+}
+
+fn help_lines() -> Vec<String> {
+    [
+        "navigation",
+        "  j/k  down/up          g/G  first/last",
+        "  tab  focus items      shift-tab  focus groups",
+        "",
+        "items",
+        "  space/x  toggle done  a/A  add sibling/child",
+        "  e  edit text          i  edit description",
+        "  d  delete             h  hide done",
+        "",
+        "query",
+        "  /  edit query         esc  clear query",
+        "",
+        "agent and sync",
+        "  n  natural language to query",
+        "  S  summarise view     b  break down item",
+        "  R  scan for changes   s  git sync",
+        "",
+        "  ?  this help          q  quit",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// First visible row so that `cursor` sits inside a window of `height` rows.
@@ -880,6 +1133,122 @@ mod tests {
         assert!(
             read(&app).contains("- [ ] alpha, amended elsewhere"),
             "the other writer's change was not clobbered"
+        );
+    }
+
+    #[test]
+    fn agent_keys_are_inert_without_configuration() {
+        let (_d, mut app) = disk_app(DOC);
+        for key in ['n', 'b'] {
+            press(&mut app, KeyCode::Char(key));
+            assert_eq!(app.mode, Mode::Normal, "{key} does not open an editor");
+            assert!(
+                app.notice
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("no agent"),
+                "{key} explains why nothing happened"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_is_inert_when_git_is_disabled() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(!app.config.git.enabled);
+        press(&mut app, KeyCode::Char('s'));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("disabled"),
+            "explains that git sync is off"
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_the_help_modal() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.mode, Mode::Modal);
+        let (title, body) = app.modal.clone().unwrap();
+        assert_eq!(title, "keys");
+        assert!(body.join("\n").contains("space/x"));
+    }
+
+    #[test]
+    fn any_key_dismisses_a_modal() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('?'));
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn a_finished_task_opens_a_modal_and_clears_busy() {
+        let (_d, mut app) = disk_app(DOC);
+        app.busy = Some("git sync".to_string());
+        app.handle(Message::Event(Event::TaskFinished {
+            title: "git sync (ok)".to_string(),
+            body: "$ git push\nsync complete".to_string(),
+        }));
+        assert!(app.busy.is_none());
+        assert_eq!(app.mode, Mode::Modal);
+        assert!(app.modal.unwrap().1.contains(&"sync complete".to_string()));
+    }
+
+    #[test]
+    fn a_proposed_query_is_applied() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::QueryProposed("!done".to_string())));
+        assert!(app.query.is_some());
+        assert_eq!(app.visible_items().len(), 1, "only alpha is open");
+    }
+
+    #[test]
+    fn a_proposed_change_set_waits_for_review() {
+        let (_d, mut app) = disk_app(DOC);
+        let set = ChangeSet::parse(
+            r#"{"summary":"s","changes":[{"file":"lefv/TODO.md","action":"complete",
+                "content":"alpha","reason":"r"}]}"#,
+        )
+        .unwrap();
+        app.handle(Message::Event(Event::ChangeSetProposed(set)));
+        assert_eq!(app.mode, Mode::ReviewingChangeSet);
+        assert_eq!(read(&app), DOC, "nothing written before review");
+    }
+
+    #[test]
+    fn y_applies_a_reviewed_change_set() {
+        let (_d, mut app) = disk_app(DOC);
+        let set = ChangeSet::parse(
+            r#"{"summary":"s","changes":[{"file":"lefv/TODO.md","action":"complete",
+                "content":"alpha","reason":"r"}]}"#,
+        )
+        .unwrap();
+        app.handle(Message::Event(Event::ChangeSetProposed(set)));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(read(&app).contains("- [x] alpha"), "change applied");
+        assert_eq!(app.mode, Mode::Modal, "report shown");
+    }
+
+    #[test]
+    fn n_discards_a_reviewed_change_set() {
+        let (_d, mut app) = disk_app(DOC);
+        let set = ChangeSet::parse(
+            r#"{"summary":"s","changes":[{"file":"lefv/TODO.md","action":"complete",
+                "content":"alpha","reason":"r"}]}"#,
+        )
+        .unwrap();
+        app.handle(Message::Event(Event::ChangeSetProposed(set)));
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(read(&app), DOC, "file untouched");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("discarded")
         );
     }
 
