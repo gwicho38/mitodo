@@ -1,6 +1,7 @@
 mod cli;
 mod logging;
 mod prelude;
+mod store;
 
 use clap::Parser;
 
