@@ -1,16 +1,6 @@
-pub use super::config::prelude::*;
-pub use super::input::prelude::*;
-pub use super::ui::prelude::*;
-pub use super::utils::prelude::*;
-pub use ratatui::prelude::*;
-pub use ratatui::widgets::*;
+// Re-export surface for the whole crate; not every name has a consumer yet
+// while the port is in progress.
+#![allow(unused_imports)]
 
-pub use super::cli::{CliArgs, execute_cli_actions};
-
-pub use super::messages::prelude::*;
-pub use super::newsflash_utils::{NewsFlashUtils, build_client};
-pub use super::query::prelude::*;
-
-pub use super::login::LoginSetup;
-
-pub use super::connectivity::ConnectionLostReason;
+pub use color_eyre::eyre::{Result, eyre};
+pub use log::{debug, error, info, warn};
