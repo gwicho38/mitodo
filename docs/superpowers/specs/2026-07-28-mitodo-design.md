@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-28
 **Status:** Draft for review
-**Lineage:** Hard fork of [christo-auer/dispatch](https://github.com/christo-auer/dispatch) v1.1.0 (GPL-3.0-or-later)
+**Lineage:** Hard fork of [christo-auer/eilmeldung](https://github.com/christo-auer/eilmeldung) v1.1.0 (GPL-3.0-or-later)
 
 ---
 
@@ -17,7 +17,7 @@ The name is Spanish — *mi todo*, "my everything" — and contains the word
 "todo" literally, so it stays self-explanatory to readers who don't speak
 Spanish.
 
-**Why a fork rather than a new project.** dispatch is a mature ratatui
+**Why a fork rather than a new project.** eilmeldung is a mature ratatui
 application whose RSS-specific surface is smaller than it looks: 29 of 49
 source files reference `news_flash`, but the references concentrate in five
 files and the rest are type imports. Everything that makes a TUI pleasant —
@@ -26,11 +26,11 @@ config loading, modals, popups, the command line, zen mode, the chyron ticker �
 is domain-agnostic and already works. Rebuilding that under a permissive
 licence would cost weeks before the first screen rendered.
 
-**Licence consequence.** dispatch is GPL-3.0-or-later, so mitodo is too. This
+**Licence consequence.** eilmeldung is GPL-3.0-or-later, so mitodo is too. This
 blocks exactly one thing: shipping mitodo inside a proprietary product. That
 is not a goal. If the markdown parse/write engine later deserves a permissive
 release, it can be extracted — that code is authored fresh here (ported from
-the author's own `todos-mcp`), not derived from dispatch, so it can be
+the author's own `todos-mcp`), not derived from eilmeldung, so it can be
 relicensed at will.
 
 ---
@@ -65,7 +65,7 @@ daily use, and each is additive later.
 
 ## 3. Architecture
 
-### Before — dispatch
+### Before — eilmeldung
 
 ```mermaid
 flowchart TD
@@ -108,7 +108,7 @@ flowchart TD
 
 ### Module disposition
 
-| dispatch module | fate |
+| eilmeldung module | fate |
 |---|---|
 | `newsflash_utils.rs`, `login.rs`, `connectivity.rs` | delete |
 | `ui/feeds_list` | becomes `ui/groups_list` — group/section tree |
@@ -301,7 +301,7 @@ sync    = [
 
 ## 7. Query language
 
-dispatch's `QueryAtom` / `QueryClause` AST, lexer, and combinators are
+eilmeldung's `QueryAtom` / `QueryClause` AST, lexer, and combinators are
 domain-agnostic. Only the field vocabulary and the filter predicate change.
 
 ```
@@ -344,11 +344,11 @@ plus the toggle key.
 Top bar shows workspace, open count, and active query. The command line
 appears on `:`. The bottom line is the status bar, which the chyron takes over
 when enabled — a scrolling ticker of P0 and overdue items, inherited from
-dispatch's existing chyron implementation.
+eilmeldung's existing chyron implementation.
 
 ### Keybindings
 
-dispatch's vim base, with `mcli todos`' letters preserved wherever they do not
+eilmeldung's vim base, with `mcli todos`' letters preserved wherever they do not
 clash, so muscle memory carries over.
 
 | key | action | key | action |
@@ -472,6 +472,6 @@ mistake in the store surfaces before any UI work depends on it.
 
 ## 14. Attribution
 
-README and a `NOTICE` file credit christo-auer/dispatch, state the GPL-3.0
-lineage, and link upstream. The `upstream` git remote is retained so dispatch's
+README and a `NOTICE` file credit christo-auer/eilmeldung, state the GPL-3.0
+lineage, and link upstream. The `upstream` git remote is retained so eilmeldung's
 TUI fixes can be cherry-picked.
