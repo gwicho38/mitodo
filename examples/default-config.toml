@@ -1,0 +1,67 @@
+# mitodo configuration
+#
+# `mitodo init <workspace>` writes one of these for you by inspecting the
+# directory. This file documents every option, including the ones init leaves
+# out when they do not apply.
+#
+# Default location: ~/.config/mitodo/config.toml
+# Override with:    mitodo --config-dir <dir>
+
+[workspace]
+# Root directory holding your todo files. A leading ~ is expanded.
+root = "~/notes/todo"
+
+# How top-level groups are formed:
+#   "directory" — one group per subdirectory containing a todo file
+#   "heading"   — one group per "## " heading inside a single todo file
+group_by = "directory"
+
+# Which files are todo files, relative to root.
+todo_glob = "*/TODO.md"
+
+# Optional sidecars. Omit either one if your workspace has no such files.
+# notes_glob  = "*/notes.md"
+# archive_dir = "_archive"
+
+[priority]
+# Where an item's priority comes from:
+#   "heading" — from the "## " section heading above it
+#   "tag"     — from an inline marker on the item itself
+#   "none"    — priorities disabled
+source = "heading"
+
+# Pattern identifying a priority in a heading, e.g. "## P1 — High Priority".
+pattern = "^P([0-3])"
+
+[git]
+# `s` runs the command list below in the workspace root and shows the output.
+# Set enabled = false to turn the key off entirely.
+enabled = true
+sync = [
+    ["add", "-A"],
+    ["commit", "-m", "mitodo: sync"],
+    ["pull", "--rebase"],
+    ["push"],
+]
+
+# --------------------------------------------------------------------------
+# Optional: an external agent.
+#
+# Omitted entirely unless you configure it, and not tied to any provider —
+# anything that takes a prompt as its last argument and prints JSON works.
+# --------------------------------------------------------------------------
+
+# [agent]
+# command     = ["claude", "--print"]
+# schema_flag = "--json-schema"     # omit if your tool has no schema flag
+# timeout_secs = 300
+#
+# Prompt templates per verb. Any verb without one uses the built-in prompt,
+# so a personal template naming your own sources stays out of version control.
+# Placeholders: {input} is what you typed, {items} is the current view.
+#
+# [agent.prompts]
+# query     = "~/.config/mitodo/prompts/query.md"
+# summarize = "~/.config/mitodo/prompts/summarize.md"
+# breakdown = "~/.config/mitodo/prompts/breakdown.md"
+# scan      = "~/.config/mitodo/prompts/scan.md"
