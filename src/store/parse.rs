@@ -3,6 +3,8 @@ use std::path::Path;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::config::{PriorityConfig, PrioritySource};
+
 use super::model::{Item, ItemId, Priority};
 
 static CHECKBOX_RE: Lazy<Regex> =
@@ -25,11 +27,71 @@ fn frontmatter_len(lines: &[&str]) -> usize {
     }
 }
 
+/// Map a captured priority marker to a band.
+///
+/// Accepts digits (`0`–`3`) and letters (`A`–`D`), so one `pattern` setting
+/// covers both `## P1 — High` headings and todo.txt-style `(A)` tags.
+fn band(marker: &str) -> Priority {
+    match marker.trim().to_ascii_uppercase().as_str() {
+        "0" | "A" => Priority::P0,
+        "1" | "B" => Priority::P1,
+        "2" | "C" => Priority::P2,
+        "3" | "D" => Priority::P3,
+        _ => Priority::None,
+    }
+}
+
+/// Priority of an item, per the workspace's configuration.
+///
+/// The same pattern is applied to whichever subject `source` selects: the
+/// section heading, or the item's own text.
+fn derive_priority(
+    matcher: Option<&Regex>,
+    source: PrioritySource,
+    section: &str,
+    text: &str,
+) -> Priority {
+    let Some(matcher) = matcher else {
+        return Priority::None;
+    };
+    let subject = match source {
+        PrioritySource::None => return Priority::None,
+        PrioritySource::Heading => section,
+        PrioritySource::Tag => text,
+    };
+    matcher
+        .captures(subject)
+        .and_then(|caps| caps.get(1))
+        .map(|m| band(m.as_str()))
+        .unwrap_or(Priority::None)
+}
+
 /// Parse one markdown todo file into items in document order.
 ///
 /// `file_rel` is the workspace-relative path used for id computation, so that
 /// identical text in two different files yields different ids.
-pub fn parse_todo_file(path: &Path, file_rel: &str, source: &str) -> Vec<Item> {
+pub fn parse_todo_file(
+    path: &Path,
+    file_rel: &str,
+    source: &str,
+    priority_config: &PriorityConfig,
+) -> Vec<Item> {
+    // Compiled once per file. An unusable pattern disables priorities rather
+    // than failing the parse, so a bad config never costs you your todo list.
+    let matcher = match priority_config.source {
+        PrioritySource::None => None,
+        _ => match Regex::new(&priority_config.pattern) {
+            Ok(re) => Some(re),
+            Err(err) => {
+                log::warn!(
+                    "priority.pattern {:?} is not a valid regex ({err}); priorities disabled",
+                    priority_config.pattern
+                );
+                None
+            }
+        },
+    };
+
     let lines: Vec<&str> = source.lines().collect();
     let start = frontmatter_len(&lines);
 
@@ -67,6 +129,8 @@ pub fn parse_todo_file(path: &Path, file_rel: &str, source: &str) -> Vec<Item> {
             }
             let parent_idx = stack.last().map(|(_, idx)| *idx);
 
+            let priority =
+                derive_priority(matcher.as_ref(), priority_config.source, &section, &text);
             let id = ItemId::compute(file_rel, &section, &heading, indent, &text);
             let item = Item {
                 id: id.clone(),
@@ -79,7 +143,7 @@ pub fn parse_todo_file(path: &Path, file_rel: &str, source: &str) -> Vec<Item> {
                 description: String::new(),
                 section: section.clone(),
                 heading: heading.clone(),
-                priority: Priority::from_heading(&section),
+                priority,
                 parent: parent_idx.map(|idx| items[idx].id.clone()),
                 children: Vec::new(),
             };
@@ -114,11 +178,24 @@ pub fn parse_todo_file(path: &Path, file_rel: &str, source: &str) -> Vec<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{PriorityConfig, PrioritySource};
     use std::path::Path;
+
+    fn heading_config() -> PriorityConfig {
+        PriorityConfig {
+            source: PrioritySource::Heading,
+            pattern: "^P([0-3])".to_string(),
+        }
+    }
 
     fn fixture() -> Vec<Item> {
         let source = include_str!("../../tests/fixtures/basic/TODO.md");
-        parse_todo_file(Path::new("lefv/TODO.md"), "lefv/TODO.md", source)
+        parse_todo_file(
+            Path::new("lefv/TODO.md"),
+            "lefv/TODO.md",
+            source,
+            &heading_config(),
+        )
     }
 
     #[test]
@@ -131,6 +208,55 @@ mod tests {
                 "raw must match the source line byte for byte"
             );
         }
+    }
+
+    #[test]
+    fn priority_source_none_disables_priorities() {
+        let cfg = PriorityConfig {
+            source: PrioritySource::None,
+            pattern: "^P([0-3])".to_string(),
+        };
+        let source = include_str!("../../tests/fixtures/basic/TODO.md");
+        let items = parse_todo_file(Path::new("f"), "f", source, &cfg);
+        assert!(
+            items.iter().all(|i| i.priority == Priority::None),
+            "source = none must mean no priorities, whatever the headings say"
+        );
+    }
+
+    #[test]
+    fn priority_source_tag_reads_the_item_text() {
+        let cfg = PriorityConfig {
+            source: PrioritySource::Tag,
+            pattern: r"\(([A-D])\)".to_string(),
+        };
+        let doc = "## Anything\n\n- [ ] (A) urgent thing\n- [ ] (C) later thing\n- [ ] untagged\n";
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        assert_eq!(items[0].priority, Priority::P0, "(A) is the top band");
+        assert_eq!(items[1].priority, Priority::P2, "(C) is the third band");
+        assert_eq!(items[2].priority, Priority::None, "untagged");
+    }
+
+    #[test]
+    fn a_custom_heading_pattern_is_honoured() {
+        let cfg = PriorityConfig {
+            source: PrioritySource::Heading,
+            pattern: r"prio-([0-3])".to_string(),
+        };
+        let doc = "## prio-1 things\n\n- [ ] a\n";
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        assert_eq!(items[0].priority, Priority::P1);
+    }
+
+    #[test]
+    fn an_invalid_pattern_disables_priorities_rather_than_panicking() {
+        let cfg = PriorityConfig {
+            source: PrioritySource::Heading,
+            pattern: "([unclosed".to_string(),
+        };
+        let doc = "## P0 — Critical\n\n- [ ] a\n";
+        let items = parse_todo_file(Path::new("f"), "f", doc, &cfg);
+        assert_eq!(items[0].priority, Priority::None);
     }
 
     #[test]

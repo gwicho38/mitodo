@@ -53,7 +53,12 @@ impl Workspace {
                 .unwrap_or(&group.todo_file)
                 .to_string_lossy()
                 .to_string();
-            items.extend(parse_todo_file(&group.todo_file, &file_rel, &source));
+            items.extend(parse_todo_file(
+                &group.todo_file,
+                &file_rel,
+                &source,
+                &config.priority,
+            ));
         }
 
         Ok(Workspace {

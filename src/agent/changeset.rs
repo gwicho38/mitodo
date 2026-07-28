@@ -159,6 +159,7 @@ fn describe(err: WriteError, what: &str, text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PriorityConfig;
     use crate::store::parse_todo_file;
 
     const DOC: &str = "## P0 — Critical\n\n- [ ] alpha\n- [x] beta\n";
@@ -167,7 +168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lefv.md");
         std::fs::write(&path, body).unwrap();
-        let items = parse_todo_file(&path, "lefv.md", body);
+        let items = parse_todo_file(&path, "lefv.md", body, &PriorityConfig::default());
         (dir, path, items)
     }
 
