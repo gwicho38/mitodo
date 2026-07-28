@@ -60,6 +60,15 @@ $ mitodo          # open the TUI
 $ mitodo list     # or just print everything
 ```
 
+Both accept filters, so the TUI can open straight into a view and `list` is
+scriptable:
+
+```sh
+$ mitodo -q 'pri:P0 !done'            # open the TUI filtered
+$ mitodo -p P0 -a work list           # -p/-a are shorthand, ANDed with -q
+$ mitodo -q 'sort:pri,text' list      # ordering works too
+```
+
 Detection understands two shapes out of the box:
 
 | layout | what you get |
@@ -68,7 +77,19 @@ Detection understands two shapes out of the box:
 | a single `TODO.md` at the root | one group per `## ` heading |
 
 Priorities are read from `## ` headings matching `P0`–`P3` if you use them, and
-simply disabled if you don't.
+disabled if you don't. If you tag items inline instead — todo.txt style — point
+the config at that:
+
+```toml
+[priority]
+source  = "tag"
+pattern = "\\(([A-D])\\)"     # (A) urgent … (D) whenever
+```
+
+The captured marker maps to a band: `0`–`3` and `A`–`D` both work, so the same
+setting covers either convention.
+
+A group can also carry a `notes.md` beside its `TODO.md`; `N` reads it.
 
 ## Keys
 
@@ -81,6 +102,7 @@ simply disabled if you don't.
 | `/` | edit query | `d` | delete (asks first) |
 | `esc` | clear query | `h` | hide done |
 | `s` | git sync | `c` | scrolling ticker |
+| `N` | read group notes | `p` | pause the ticker |
 | `?` | help | `q` | quit |
 
 ## Queries
@@ -90,6 +112,7 @@ pri:P0 acct:work !done          urgent, mine, not finished
 sec:"High Priority" has:desc    by section, with notes attached
 (pri:P0 OR pri:P1) AND !done    parentheses and explicit operators
 onehouse                        bare words match text and descriptions
+sort:pri,text                   order by priority, then alphabetically
 ```
 
 | field | matches |
@@ -100,8 +123,11 @@ onehouse                        bare words match text and descriptions
 | `sec:` `section:` | the `## ` heading, substring |
 | `has:desc` | items with a description block |
 | `text:` | text and description, substring |
+| `sort:` | ordering: `pri` `text` `group` `section` `done`, comma-separated |
 
-Adjacent terms are ANDed. `NOT` and a leading `!` both negate.
+Adjacent terms are ANDed. `NOT` and a leading `!` both negate. `sort:` is not a
+filter — it orders whatever survives the rest of the query, applying its keys in
+turn, and ties keep the order they had in the file.
 
 ## The file format
 
