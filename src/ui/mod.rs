@@ -390,10 +390,9 @@ impl App {
                 None => self.notice = Some("no item selected".to_string()),
             },
             (K::Char('R'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Scan, String::new()),
-            (K::Char('d'), KeyModifiers::NONE) => {
-                if self.selected_item().is_some() {
-                    self.mode = Mode::ConfirmingDelete;
-                }
+            // Guarded rather than nested: deleting nothing is not a mode.
+            (K::Char('d'), KeyModifiers::NONE) if self.selected_item().is_some() => {
+                self.mode = Mode::ConfirmingDelete;
             }
             _ => {}
         }
