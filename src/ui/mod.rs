@@ -24,6 +24,48 @@ use chyron::TickerState;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// A background task the user is waiting on.
+///
+/// Carries enough to prove it is still alive: a frame that advances on every
+/// tick, and when it started. A scan over a real inbox runs for minutes, and a
+/// motionless banner cannot be told apart from a wedged process.
+#[derive(Debug, Clone)]
+pub struct Busy {
+    pub label: String,
+    pub started: std::time::Instant,
+    frame: usize,
+}
+
+impl Busy {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            started: std::time::Instant::now(),
+            frame: 0,
+        }
+    }
+
+    fn tick(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    /// The current spinner glyph.
+    pub fn spinner(&self) -> char {
+        const FRAMES: [char; 8] = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
+        FRAMES[(self.frame / 2) % FRAMES.len()]
+    }
+
+    /// How long it has been running, as "8s" or "2m 04s".
+    pub fn elapsed(&self) -> String {
+        let secs = self.started.elapsed().as_secs();
+        if secs < 60 {
+            format!("{secs}s")
+        } else {
+            format!("{}m {:02}s", secs / 60, secs % 60)
+        }
+    }
+}
+
 /// A draggable boundary between panes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Divider {
@@ -134,8 +176,8 @@ pub struct App {
     pub modal: Option<(String, Vec<String>)>,
     /// Change-set awaiting review.
     pub pending: Option<ChangeSet>,
-    /// Label of a background task in flight.
-    pub busy: Option<String>,
+    /// The background task in flight, if any.
+    pub busy: Option<Busy>,
     /// Scrolling ticker, when enabled.
     pub ticker: Option<TickerState>,
     /// Wrap long item text instead of truncating it.
@@ -343,6 +385,9 @@ impl App {
                 if let Some(mut ticker) = self.ticker.take() {
                     ticker.advance();
                     self.ticker = Some(ticker);
+                }
+                if let Some(busy) = &mut self.busy {
+                    busy.tick();
                 }
             }
             Message::Event(Event::TaskFinished { title, body }) => {
@@ -1091,7 +1136,7 @@ impl App {
         ) else {
             return;
         };
-        self.busy = Some("git sync".to_string());
+        self.busy = Some(Busy::new("git sync"));
         std::thread::spawn(move || {
             let outcome = git::run_sync(&root, &commands, "git");
             let _ = sender.send(Msg::Event(Event::TaskFinished {
@@ -1117,9 +1162,10 @@ impl App {
         );
         let command = self.config.agent.command.clone();
         let schema_flag = self.config.agent.schema_flag.clone();
+        let timeout = self.config.agent.timeout_secs;
         let root = self.workspace.root.clone();
 
-        self.busy = Some(verb.label().to_string());
+        self.busy = Some(Busy::new(verb.label()));
         std::thread::spawn(move || {
             let result = agent::run(
                 &command,
@@ -1127,6 +1173,7 @@ impl App {
                 verb.schema(),
                 &prompt,
                 &root,
+                timeout,
             );
             let event = match result {
                 Err(err) => Event::TaskFinished {
@@ -2477,6 +2524,51 @@ mod tests {
     }
 
     #[test]
+    fn the_spinner_advances_on_every_tick() {
+        // A motionless banner cannot be told apart from a wedged process.
+        let (_d, mut app) = disk_app(DOC);
+        app.busy = Some(Busy::new("scan"));
+
+        let first = app.busy.as_ref().unwrap().spinner();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..16 {
+            app.handle(Message::Event(Event::Tick));
+            seen.insert(app.busy.as_ref().unwrap().spinner());
+        }
+        assert!(seen.len() > 1, "the spinner moved");
+        assert!(seen.contains(&first), "and cycles back round");
+    }
+
+    #[test]
+    fn ticks_are_harmless_when_nothing_is_running() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(app.busy.is_none());
+        app.handle(Message::Event(Event::Tick));
+        assert!(app.busy.is_none());
+    }
+
+    #[test]
+    fn elapsed_reads_as_seconds_then_minutes() {
+        let mut busy = Busy::new("scan");
+        assert_eq!(busy.elapsed(), "0s");
+        busy.started = std::time::Instant::now() - std::time::Duration::from_secs(75);
+        assert_eq!(busy.elapsed(), "1m 15s");
+        busy.started = std::time::Instant::now() - std::time::Duration::from_secs(600);
+        assert_eq!(busy.elapsed(), "10m 00s");
+    }
+
+    #[test]
+    fn a_finished_task_clears_the_busy_state() {
+        let (_d, mut app) = disk_app(DOC);
+        app.busy = Some(Busy::new("scan"));
+        app.handle(Message::Event(Event::TaskFinished {
+            title: "scan".to_string(),
+            body: "done".to_string(),
+        }));
+        assert!(app.busy.is_none(), "the spinner stops when the work does");
+    }
+
+    #[test]
     fn shifted_keys_work_however_the_terminal_reports_them() {
         // Regression: R and S were dead keys in terminals that report shift
         // differently from tmux.
@@ -2597,7 +2689,7 @@ mod tests {
     #[test]
     fn a_finished_task_opens_a_modal_and_clears_busy() {
         let (_d, mut app) = disk_app(DOC);
-        app.busy = Some("git sync".to_string());
+        app.busy = Some(Busy::new("git sync"));
         app.handle(Message::Event(Event::TaskFinished {
             title: "git sync (ok)".to_string(),
             body: "$ git push\nsync complete".to_string(),

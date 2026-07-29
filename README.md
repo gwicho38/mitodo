@@ -267,8 +267,18 @@ whatever you typed.
 Anything that writes shows you a diff first and applies through the same
 conflict-aware writer, so a stale proposal is refused rather than forced.
 
-While an agent is running the status bar says so — a scan over a real inbox
-takes a while, and the rest of the app stays usable meanwhile.
+While an agent is running the status bar says so, with a spinner and a clock:
+
+```
+ ⣻ running scan for 2m 14s · still working · the rest of the app is usable
+```
+
+A scan over a real inbox takes minutes, so it says how long it has been going
+and keeps moving to show it has not wedged. The rest of the app stays usable
+throughout — browse, filter and tick things off while it runs.
+
+If an agent never answers it is killed and reported rather than left waiting:
+set `agent.timeout_secs` (default 600).
 
 ## Configuration
 

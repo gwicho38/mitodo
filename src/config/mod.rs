@@ -56,6 +56,10 @@ fn yes() -> bool {
     true
 }
 
+fn default_timeout() -> u64 {
+    600
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -124,6 +128,9 @@ pub struct AgentConfig {
     /// Flag the schema is passed behind, if the tool supports one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_flag: Option<String>,
+    /// Give up on an agent that has not answered in this long.
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
     /// Paths to prompt templates, keyed by verb. Missing verbs use the
     /// built-in prompt, so a personal template (naming your own sources) stays
     /// local rather than shipping in the repository.

@@ -73,7 +73,7 @@ wrap      = false
 # [agent]
 # command     = ["claude", "--print"]
 # schema_flag = "--json-schema"     # omit if your tool has no schema flag
-# timeout_secs = 300
+# timeout_secs = 600   # give up on an agent that has not answered by then
 #
 # Prompt templates per verb. Any verb without one uses the built-in prompt,
 # so a personal template naming your own sources stays out of version control.

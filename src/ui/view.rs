@@ -203,7 +203,10 @@ fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::styled(" !done ", theme.query()));
     }
     if let Some(busy) = &app.busy {
-        spans.push(Span::styled(format!(" ⣟ {busy}… "), theme.tooltip_info()));
+        spans.push(Span::styled(
+            format!(" {} {} {} ", busy.spinner(), busy.label, busy.elapsed()),
+            theme.tooltip_info(),
+        ));
     }
     if !app.query_input.is_empty() && app.query.is_some() {
         spans.push(Span::styled(
@@ -551,7 +554,12 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!(" ⣟ running {busy}… this may take a while · esc to keep working "),
+                format!(
+                    " {} running {} for {} · still working · the rest of the app is usable ",
+                    busy.spinner(),
+                    busy.label,
+                    busy.elapsed()
+                ),
                 theme.tooltip_info(),
             )))
             .style(theme.statusbar()),
@@ -616,6 +624,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Busy;
     use super::*;
     use crate::config::Config;
     use crate::store::Workspace;
@@ -830,11 +839,12 @@ mod tests {
     #[test]
     fn a_running_agent_takes_over_the_status_bar() {
         let mut app = test_app();
-        app.busy = Some("scan".to_string());
+        app.busy = Some(Busy::new("scan"));
         let rows = draw_app(&app, 90, 24);
         let last = rows.last().unwrap();
         assert!(last.contains("running scan"), "got {last:?}");
-        assert!(last.contains("may take a while"), "sets the expectation");
+        assert!(last.contains("still working"), "says it is alive");
+        assert!(last.contains("for 0s"), "shows how long it has been going");
     }
 
     #[test]

@@ -14,7 +14,8 @@
 pub mod changeset;
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 pub use changeset::{Change, ChangeAction, ChangeSet};
 
@@ -28,6 +29,8 @@ pub enum AgentError {
     Failed(String, String),
     #[error("agent output was not valid JSON: {0}")]
     BadJson(String),
+    #[error("agent did not finish within {0}s")]
+    TimedOut(u64),
 }
 
 /// What the agent is being asked to do.
@@ -125,6 +128,7 @@ pub fn run(
     schema: &str,
     prompt: &str,
     cwd: &Path,
+    timeout_secs: u64,
 ) -> Result<String, AgentError> {
     let Some((program, leading)) = command.split_first() else {
         return Err(AgentError::NotConfigured);
@@ -135,10 +139,36 @@ pub fn run(
     if let Some(flag) = schema_flag {
         cmd.arg(flag).arg(schema);
     }
-    cmd.arg(prompt).current_dir(cwd);
+    cmd.arg(prompt)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| AgentError::Spawn(program.clone(), err))?;
+
+    // Poll rather than block, so a wedged agent is killed instead of leaving
+    // the UI waiting on it for the rest of the session. The replies are small
+    // JSON documents, so the pipe buffer will not fill while we wait.
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AgentError::TimedOut(timeout_secs));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(AgentError::Spawn(program.clone(), err)),
+        }
+    }
+
+    let output = child
+        .wait_with_output()
         .map_err(|err| AgentError::Spawn(program.clone(), err))?;
 
     if !output.status.success() {
@@ -223,7 +253,7 @@ mod tests {
     fn runs_a_command_and_returns_stdout() {
         let dir = tempfile::tempdir().unwrap();
         let command = vec!["echo".to_string()];
-        let out = run(&command, None, "{}", "hello", dir.path()).unwrap();
+        let out = run(&command, None, "{}", "hello", dir.path(), 30).unwrap();
         assert_eq!(out.trim(), "hello");
     }
 
@@ -231,7 +261,15 @@ mod tests {
     fn passes_the_schema_behind_the_configured_flag() {
         let dir = tempfile::tempdir().unwrap();
         let command = vec!["echo".to_string()];
-        let out = run(&command, Some("--schema"), "SCHEMA", "PROMPT", dir.path()).unwrap();
+        let out = run(
+            &command,
+            Some("--schema"),
+            "SCHEMA",
+            "PROMPT",
+            dir.path(),
+            30,
+        )
+        .unwrap();
         assert!(out.contains("--schema SCHEMA PROMPT"), "got {out:?}");
     }
 
@@ -239,7 +277,7 @@ mod tests {
     fn an_empty_command_is_not_configured() {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
-            run(&[], None, "{}", "p", dir.path()),
+            run(&[], None, "{}", "p", dir.path(), 30),
             Err(AgentError::NotConfigured)
         ));
     }
@@ -249,7 +287,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let command = vec!["definitely-not-a-real-program".to_string()];
         assert!(matches!(
-            run(&command, None, "{}", "p", dir.path()),
+            run(&command, None, "{}", "p", dir.path(), 30),
             Err(AgentError::Spawn(..))
         ));
     }
@@ -262,10 +300,32 @@ mod tests {
             "-c".to_string(),
             "echo boom >&2; exit 2".to_string(),
         ];
-        match run(&command, None, "{}", "ignored", dir.path()) {
+        match run(&command, None, "{}", "ignored", dir.path(), 30) {
             Err(AgentError::Failed(_, stderr)) => assert!(stderr.contains("boom")),
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_wedged_agent_is_killed_rather_than_waited_on_forever() {
+        let dir = tempfile::tempdir().unwrap();
+        // The prompt is appended as the last argument, so the command has to
+        // tolerate an extra one.
+        let command = vec!["sh".to_string(), "-c".to_string(), "sleep 60".to_string()];
+        let started = std::time::Instant::now();
+        let result = run(&command, None, "{}", "ignored", dir.path(), 1);
+        assert!(matches!(result, Err(AgentError::TimedOut(1))), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "gave up promptly"
+        );
+    }
+
+    #[test]
+    fn a_prompt_config_is_still_honoured_within_the_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = vec!["echo".to_string()];
+        assert!(run(&command, None, "{}", "quick", dir.path(), 30).is_ok());
     }
 
     #[test]
