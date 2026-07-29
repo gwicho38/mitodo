@@ -92,17 +92,28 @@ impl Verb {
                  six short sub-items. Reply with JSON only.\n\nItem: {input}"
             }
             Verb::Scan => {
-                "Find actionable items from the sources available to you that are not yet \
-                 in the todo files below, and identify existing items that have since been \
-                 resolved. Reply with JSON only.\n\n{items}"
+                "You are a todo tracking assistant. Read the todo files below, then:\n\
+                 1. Find new actionable items from the sources available to you that are \
+                 not already listed.\n\
+                 2. Identify existing unchecked items that have since been resolved.\n\n\
+                 Reply with JSON only. Each change names the file it belongs to, using the \
+                 workspace-relative path exactly as shown below.\n\n{files}"
             }
         }
     }
 }
 
-/// Substitute `{input}` and `{items}` into a prompt template.
-pub fn render_prompt(template: &str, input: &str, items: &str) -> String {
-    template.replace("{input}", input).replace("{items}", items)
+/// Substitute the prompt placeholders.
+///
+/// `{items}` is the view as rendered — enough for summarising what is on
+/// screen. `{files}` is every todo file with its workspace-relative path and
+/// full contents, which is what a change-set needs: a change names the file it
+/// belongs to, so an agent that never saw the paths cannot produce one.
+pub fn render_prompt(template: &str, input: &str, items: &str, files: &str) -> String {
+    template
+        .replace("{input}", input)
+        .replace("{items}", items)
+        .replace("{files}", files)
 }
 
 /// Run the configured agent and return its raw stdout.
@@ -187,14 +198,25 @@ mod tests {
 
     #[test]
     fn prompt_templates_substitute_placeholders() {
-        let out = render_prompt("do {input} with {items}", "X", "Y");
-        assert_eq!(out, "do X with Y");
+        let out = render_prompt("do {input} with {items} and {files}", "X", "Y", "Z");
+        assert_eq!(out, "do X with Y and Z");
     }
 
     #[test]
     fn unused_placeholders_are_left_alone() {
-        let out = render_prompt("only {input}", "X", "Y");
+        let out = render_prompt("only {input}", "X", "Y", "Z");
         assert_eq!(out, "only X");
+    }
+
+    #[test]
+    fn the_scan_prompt_asks_for_the_files_not_the_view() {
+        // A change-set names the file it belongs to, so scan must see paths.
+        let prompt = Verb::Scan.default_prompt();
+        assert!(prompt.contains("{files}"), "scan needs the file dump");
+        assert!(
+            !prompt.contains("{items}"),
+            "the rendered view is not enough"
+        );
     }
 
     #[test]

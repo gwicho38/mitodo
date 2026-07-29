@@ -77,7 +77,9 @@ wrap      = false
 #
 # Prompt templates per verb. Any verb without one uses the built-in prompt,
 # so a personal template naming your own sources stays out of version control.
-# Placeholders: {input} is what you typed, {items} is the current view.
+# Placeholders: {input} is what you typed, {items} is the current view, and
+# {files} is every todo file with its path and contents. scan needs {files},
+# since each proposed change names the file it belongs to.
 #
 # [agent.prompts]
 # query     = "~/.config/mitodo/prompts/query.md"

@@ -258,6 +258,12 @@ scan = "~/.config/mitodo/prompts/scan.md"   # your own prompt, kept local
 | `b` | break the selected item into sub-items | after review |
 | `R` | scan for changes across the workspace | after review |
 
+Prompt templates get two placeholders: `{items}` is the view as rendered, and
+`{files}` is every todo file with its workspace-relative path and contents.
+`scan` needs `{files}` — a proposed change names the file it belongs to, so an
+agent that never saw the paths cannot produce a usable one. `{input}` is
+whatever you typed.
+
 Anything that writes shows you a diff first and applies through the same
 conflict-aware writer, so a stale proposal is refused rather than forced.
 

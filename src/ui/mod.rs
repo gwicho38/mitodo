@@ -1029,6 +1029,29 @@ impl App {
     }
 
     /// Everything the agent needs about the current view, as plain text.
+    /// Every todo file, with its workspace-relative path and contents.
+    ///
+    /// This is what `scan` needs: a proposed change names the file it belongs
+    /// to, so the agent has to have seen the paths.
+    fn files_context(&self) -> String {
+        self.workspace
+            .groups
+            .iter()
+            .filter_map(|group| {
+                let rel = group
+                    .todo_file
+                    .strip_prefix(&self.workspace.root)
+                    .unwrap_or(&group.todo_file)
+                    .to_string_lossy()
+                    .to_string();
+                std::fs::read_to_string(&group.todo_file)
+                    .ok()
+                    .map(|text| format!("### {rel}\n```markdown\n{text}\n```"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     fn items_context(&self) -> String {
         self.visible_items()
             .iter()
@@ -1085,8 +1108,12 @@ impl App {
         let Some(sender) = self.sender.clone() else {
             return;
         };
-        let prompt =
-            agent::render_prompt(&self.prompt_template(verb), &input, &self.items_context());
+        let prompt = agent::render_prompt(
+            &self.prompt_template(verb),
+            &input,
+            &self.items_context(),
+            &self.files_context(),
+        );
         let command = self.config.agent.command.clone();
         let schema_flag = self.config.agent.schema_flag.clone();
         let root = self.workspace.root.clone();
@@ -2425,6 +2452,34 @@ mod tests {
             app.ticker.as_ref().unwrap().items.len(),
             0,
             "ticker follows the workspace"
+        );
+    }
+
+    #[test]
+    fn the_file_context_carries_paths_and_contents() {
+        // Without the workspace-relative path, a scan change-set cannot say
+        // which file it belongs to.
+        let (_d, app) = disk_app(DOC);
+        let context = app.files_context();
+        assert!(
+            context.contains("### lefv/TODO.md"),
+            "path shown: {context}"
+        );
+        assert!(context.contains("- [ ] alpha"), "contents included");
+        assert!(context.contains("```markdown"), "fenced for the agent");
+    }
+
+    #[test]
+    fn the_view_context_is_the_rendered_list() {
+        let (_d, app) = disk_app(DOC);
+        let context = app.items_context();
+        assert!(
+            context.contains("- [ ] alpha"),
+            "the rendered line, priority as configured: {context}"
+        );
+        assert!(
+            !context.contains("TODO.md"),
+            "no paths; that is what files is for"
         );
     }
 
