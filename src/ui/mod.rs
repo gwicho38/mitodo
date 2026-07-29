@@ -379,6 +379,7 @@ impl App {
         // A notice reports what just happened; the next thing you do dismisses
         // it. Without this it sits over the keybinding hints forever.
         self.notice = None;
+        let key = normalise(key);
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::EditingQuery => self.handle_query_key(key),
@@ -539,7 +540,7 @@ impl App {
             (K::Char('j'), KeyModifiers::NONE) | (K::Down, _) => self.move_cursor(1),
             (K::Char('k'), KeyModifiers::NONE) | (K::Up, _) => self.move_cursor(-1),
             (K::Char('g'), KeyModifiers::NONE) => self.cursor_to_start(),
-            (K::Char('G'), KeyModifiers::SHIFT) => self.cursor_to_end(),
+            (K::Char('G'), _) => self.cursor_to_end(),
 
             (K::Tab, _) | (K::Char('l'), KeyModifiers::NONE) | (K::Right, _) => {
                 self.focus = Focus::Items
@@ -550,7 +551,7 @@ impl App {
 
             (K::Char(' '), _) | (K::Char('x'), KeyModifiers::NONE) => self.toggle_selected(),
             (K::Char('a'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
-            (K::Char('A'), KeyModifiers::SHIFT) => self.begin_edit(EditKind::AddChild, false),
+            (K::Char('A'), _) => self.begin_edit(EditKind::AddChild, false),
             (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
             (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
             (K::Char('s'), KeyModifiers::NONE) => self.spawn_git_sync(),
@@ -575,10 +576,10 @@ impl App {
                 self.view_cursor = 0;
                 self.mode = Mode::ViewMenu;
             }
-            (K::Char('N'), KeyModifiers::SHIFT) => self.show_notes(),
-            (K::Char('X'), KeyModifiers::SHIFT) => self.begin_archive(),
+            (K::Char('N'), _) => self.show_notes(),
+            (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
-            (K::Char('S'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Summarize, String::new()),
+            (K::Char('S'), _) => self.spawn_agent(Verb::Summarize, String::new()),
             (K::Char('b'), KeyModifiers::NONE) => match self.selected_item() {
                 Some(item) => {
                     let text = item.text.clone();
@@ -586,7 +587,7 @@ impl App {
                 }
                 None => self.notice = Some("no item selected".to_string()),
             },
-            (K::Char('R'), KeyModifiers::SHIFT) => self.spawn_agent(Verb::Scan, String::new()),
+            (K::Char('R'), _) => self.spawn_agent(Verb::Scan, String::new()),
             // Guarded rather than nested: deleting nothing is not a mode.
             (K::Char('d'), KeyModifiers::NONE) if self.selected_item().is_some() => {
                 self.mode = Mode::ConfirmingDelete;
@@ -1249,6 +1250,26 @@ fn row_index(rect: Rect, y: u16) -> Option<usize> {
     let first = rect.y + 1;
     let last = rect.y + rect.height.saturating_sub(1);
     (y >= first && y < last).then(|| (y - first) as usize)
+}
+
+/// Fold the terminal's shift reporting into one shape.
+///
+/// Terminals disagree about shifted letters: some send `Char('R')` with SHIFT,
+/// some `Char('R')` with no modifier, and some `Char('r')` with SHIFT. Binding
+/// on an exact modifier set therefore works in one terminal and silently does
+/// nothing in another, which is how `R` and `S` came to be dead keys.
+fn normalise(key: KeyEvent) -> KeyEvent {
+    match key.code {
+        KeyCode::Char(c)
+            if c.is_ascii_lowercase() && key.modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            KeyEvent {
+                code: KeyCode::Char(c.to_ascii_uppercase()),
+                ..key
+            }
+        }
+        _ => key,
+    }
 }
 
 /// Rows moved per wheel notch.
@@ -2453,6 +2474,47 @@ mod tests {
             0,
             "ticker follows the workspace"
         );
+    }
+
+    #[test]
+    fn shifted_keys_work_however_the_terminal_reports_them() {
+        // Regression: R and S were dead keys in terminals that report shift
+        // differently from tmux.
+        for (code, modifiers) in [
+            (KeyCode::Char('G'), KeyModifiers::SHIFT), // tmux
+            (KeyCode::Char('G'), KeyModifiers::NONE),  // no modifier reported
+            (KeyCode::Char('g'), KeyModifiers::SHIFT), // base key reported
+        ] {
+            let (_d, mut app) = disk_app("## P0\n\n- [ ] a\n- [ ] b\n- [ ] c\n");
+            app.handle_key(KeyEvent::new(code, modifiers));
+            assert_eq!(
+                app.item_cursor, 2,
+                "G should jump to the end for {code:?} + {modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lowercase_keys_are_unaffected_by_normalisation() {
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] a\n- [ ] b\n- [ ] c\n");
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.item_cursor, 0, "plain g is still go-to-top");
+    }
+
+    #[test]
+    fn the_scan_key_reaches_the_agent_however_shift_is_reported() {
+        for modifiers in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
+            let (_d, mut app) = disk_app(DOC);
+            app.handle_key(KeyEvent::new(KeyCode::Char('R'), modifiers));
+            // No agent configured here, so it reports that rather than nothing.
+            assert!(
+                app.notice
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("no agent"),
+                "R was a dead key for {modifiers:?}"
+            );
+        }
     }
 
     #[test]

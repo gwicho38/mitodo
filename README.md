@@ -267,6 +267,9 @@ whatever you typed.
 Anything that writes shows you a diff first and applies through the same
 conflict-aware writer, so a stale proposal is refused rather than forced.
 
+While an agent is running the status bar says so — a scan over a real inbox
+takes a while, and the rest of the app stays usable meanwhile.
+
 ## Configuration
 
 ```toml

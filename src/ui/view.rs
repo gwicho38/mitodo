@@ -544,6 +544,22 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_status(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
+    // A running agent or sync outranks the hints: it is the thing you are
+    // waiting on, and the top-bar glyph alone is easy to miss.
+    if let Some(busy) = &app.busy
+        && app.query_error.is_none()
+    {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" ⣟ running {busy}… this may take a while · esc to keep working "),
+                theme.tooltip_info(),
+            )))
+            .style(theme.statusbar()),
+            area,
+        );
+        return;
+    }
+
     // The ticker takes over the status row when enabled, as in eilmeldung.
     if let Some(ticker) = &app.ticker
         && app.mode == Mode::Normal
@@ -809,6 +825,24 @@ mod tests {
         app.workspace.items[0].description = "needs CPA sign-off".to_string();
         let rows = draw_app(&app, 80, 24).join("\n");
         assert!(rows.contains("needs CPA sign-off"));
+    }
+
+    #[test]
+    fn a_running_agent_takes_over_the_status_bar() {
+        let mut app = test_app();
+        app.busy = Some("scan".to_string());
+        let rows = draw_app(&app, 90, 24);
+        let last = rows.last().unwrap();
+        assert!(last.contains("running scan"), "got {last:?}");
+        assert!(last.contains("may take a while"), "sets the expectation");
+    }
+
+    #[test]
+    fn the_hints_come_back_when_nothing_is_running() {
+        let app = test_app();
+        assert!(app.busy.is_none());
+        let rows = draw_app(&app, 90, 24);
+        assert!(rows.last().unwrap().contains("q quit"));
     }
 
     #[test]
