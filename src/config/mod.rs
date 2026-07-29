@@ -47,6 +47,9 @@ pub struct UiConfig {
     /// selection and scrollback back to the terminal emulator.
     #[serde(default = "yes")]
     pub mouse: bool,
+    /// Wrap long item text across several rows instead of truncating it.
+    #[serde(default)]
+    pub wrap: bool,
 }
 
 fn yes() -> bool {
@@ -59,6 +62,7 @@ impl Default for UiConfig {
             hide_done: false,
             ticker: false,
             mouse: true,
+            wrap: false,
         }
     }
 }

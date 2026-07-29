@@ -1,5 +1,6 @@
 pub mod chyron;
 mod view;
+pub mod wrap;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
@@ -48,6 +49,32 @@ pub enum Mode {
     ReviewingChangeSet,
     /// Typing the input for an agent verb.
     AskingAgent(Verb),
+    /// The view-settings menu is open.
+    ViewMenu,
+}
+
+/// A toggle in the view menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewSetting {
+    Wrap,
+    HideDone,
+    Ticker,
+}
+
+impl ViewSetting {
+    pub const ALL: [ViewSetting; 3] = [
+        ViewSetting::Wrap,
+        ViewSetting::HideDone,
+        ViewSetting::Ticker,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewSetting::Wrap => "wrap long text",
+            ViewSetting::HideDone => "hide finished items",
+            ViewSetting::Ticker => "scrolling ticker",
+        }
+    }
 }
 
 /// What the text currently being typed will become.
@@ -102,10 +129,17 @@ pub struct App {
     pub busy: Option<String>,
     /// Scrolling ticker, when enabled.
     pub ticker: Option<TickerState>,
+    /// Wrap long item text instead of truncating it.
+    pub wrap: bool,
+    /// Cursor position within the view-settings menu.
+    pub view_cursor: usize,
     /// Height of the items pane when the divider has been dragged.
     pub items_height: Option<u16>,
     /// Layout of the last frame drawn, for hit-testing mouse events.
-    layout: view::Frames,
+    pub(crate) layout: view::Frames,
+    /// Which item each row of the item pane showed, so a click on a wrapped
+    /// item's second row still selects that item.
+    item_rows: Vec<usize>,
     /// True while the items/detail divider is being dragged.
     dragging_divider: bool,
     sender: Option<UnboundedSender<Msg>>,
@@ -118,6 +152,7 @@ pub struct App {
 impl App {
     pub fn new(workspace: Workspace, config: Config) -> Self {
         let hide_done = config.ui.hide_done;
+        let config_wrap = config.ui.wrap;
         let ticker = config.ui.ticker.then(|| TickerState::new(2));
         Self {
             workspace,
@@ -138,8 +173,11 @@ impl App {
             pending: None,
             busy: None,
             ticker,
+            wrap: config_wrap,
+            view_cursor: 0,
             items_height: None,
             layout: view::Frames::default(),
+            item_rows: Vec::new(),
             dragging_divider: false,
             sender: None,
             should_quit: false,
@@ -170,6 +208,7 @@ impl App {
             ticker: self.ticker.is_some(),
             // Not a view toggle; preserve whatever the user configured.
             mouse: self.config.ui.mouse,
+            wrap: self.wrap,
         };
         if current == self.config.ui {
             return;
@@ -240,7 +279,8 @@ impl App {
         let mut drawn = None;
         terminal.draw(|frame| drawn = Some(view::render(&self, frame)))?;
         if let Some(frames) = drawn {
-            self.layout = frames;
+            self.layout = frames.frames;
+            self.item_rows = frames.item_rows;
         }
 
         while let Some(message) = messages.recv().await {
@@ -253,7 +293,8 @@ impl App {
             let mut drawn = None;
             terminal.draw(|frame| drawn = Some(view::render(&self, frame)))?;
             if let Some(frames) = drawn {
-                self.layout = frames;
+                self.layout = frames.frames;
+                self.item_rows = frames.item_rows;
             }
         }
 
@@ -321,6 +362,36 @@ impl App {
             }
             Mode::ReviewingChangeSet => self.handle_review_key(key),
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
+            Mode::ViewMenu => self.handle_view_key(key),
+        }
+    }
+
+    /// Whether a view setting is currently on.
+    pub fn view_setting(&self, setting: ViewSetting) -> bool {
+        match setting {
+            ViewSetting::Wrap => self.wrap,
+            ViewSetting::HideDone => self.hide_done,
+            ViewSetting::Ticker => self.ticker.is_some(),
+        }
+    }
+
+    fn toggle_view_setting(&mut self, setting: ViewSetting) {
+        match setting {
+            ViewSetting::Wrap => self.wrap = !self.wrap,
+            ViewSetting::HideDone => self.toggle_hide_done(),
+            ViewSetting::Ticker => self.toggle_ticker(),
+        }
+    }
+
+    fn handle_view_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let last = ViewSetting::ALL.len() - 1;
+        match key.code {
+            K::Esc | K::Char('q') | K::Char('v') => self.mode = Mode::Normal,
+            K::Char('j') | K::Down => self.view_cursor = (self.view_cursor + 1).min(last),
+            K::Char('k') | K::Up => self.view_cursor = self.view_cursor.saturating_sub(1),
+            K::Char(' ') | K::Enter => self.toggle_view_setting(ViewSetting::ALL[self.view_cursor]),
+            _ => {}
         }
     }
 
@@ -466,6 +537,10 @@ impl App {
                 }
             }
             (K::Char('?'), _) => self.open_modal("keys", help_lines()),
+            (K::Char('v'), KeyModifiers::NONE) => {
+                self.view_cursor = 0;
+                self.mode = Mode::ViewMenu;
+            }
             (K::Char('N'), KeyModifiers::SHIFT) => self.show_notes(),
             (K::Char('X'), KeyModifiers::SHIFT) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
@@ -491,11 +566,20 @@ impl App {
     /// Hit-tested against the layout of the frame actually on screen, so a
     /// dragged divider or a visible command line does not throw the maths off.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
-        // Modal and prompt states own the screen; ignore clicks behind them.
+        let (x, y) = (mouse.column, mouse.row);
+
+        // The view menu is the one overlay that takes clicks.
+        if self.mode == Mode::ViewMenu {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.click_view_menu(x, y);
+            }
+            return;
+        }
+
+        // Other modal and prompt states own the screen; ignore clicks behind them.
         if self.mode != Mode::Normal {
             return;
         }
-        let (x, y) = (mouse.column, mouse.row);
 
         match mouse.kind {
             MouseEventKind::ScrollDown => self.scroll_at(x, y, 1),
@@ -548,7 +632,33 @@ impl App {
         };
     }
 
+    /// A click while the view menu is open: toggle an entry, or dismiss.
+    fn click_view_menu(&mut self, x: u16, y: u16) {
+        let tab = view::view_tab_rect(self.layout.top_bar);
+        if within(tab, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let menu = view::view_menu_rect(self.layout.top_bar);
+        if !within(menu, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if let Some(row) = row_index(menu, y)
+            && let Some(setting) = ViewSetting::ALL.get(row).copied()
+        {
+            self.view_cursor = row;
+            self.toggle_view_setting(setting);
+        }
+    }
+
     fn click_at(&mut self, x: u16, y: u16) {
+        // The view tab lives in the top bar and opens its menu.
+        if within(view::view_tab_rect(self.layout.top_bar), x, y) {
+            self.view_cursor = 0;
+            self.mode = Mode::ViewMenu;
+            return;
+        }
         if within(self.layout.groups, x, y) {
             if let Some(index) = row_index(self.layout.groups, y) {
                 let rows = self.workspace.groups.len() + 1;
@@ -561,14 +671,11 @@ impl App {
                 }
             }
         } else if within(self.layout.items, x, y)
-            && let Some(index) = row_index(self.layout.items, y)
+            && let Some(row) = row_index(self.layout.items, y)
+            && let Some(index) = self.item_rows.get(row).copied()
         {
-            let len = self.visible_items().len();
-            let start = viewport_start(self.item_cursor, len, content_height(self.layout.items));
-            if start + index < len {
-                self.focus = Focus::Items;
-                self.item_cursor = start + index;
-            }
+            self.focus = Focus::Items;
+            self.item_cursor = index;
         }
     }
 
@@ -977,6 +1084,9 @@ fn help_lines() -> Vec<String> {
         "  N  read the selected group's notes.md",
         "  X  archive finished items into _archive/",
         "  +/-  faster/slower",
+        "",
+        "view",
+        "  v  view settings (wrap, hide done, ticker)",
         "",
         "  ?  this help          q  quit",
     ]
@@ -1605,6 +1715,101 @@ mod tests {
         );
     }
 
+    // --- view menu ---
+
+    #[test]
+    fn v_opens_and_closes_the_view_menu() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.mode, Mode::ViewMenu);
+        press(&mut app, KeyCode::Char('v'));
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn esc_closes_the_view_menu() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('v'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn space_toggles_wrap_from_the_menu() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(!app.wrap);
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.wrap, "first entry is wrap");
+        press(&mut app, KeyCode::Char(' '));
+        assert!(!app.wrap);
+    }
+
+    #[test]
+    fn the_menu_reaches_every_setting() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('v'));
+
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.hide_done, "second entry is hide done");
+
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.ticker.is_some(), "third entry is the ticker");
+    }
+
+    #[test]
+    fn the_menu_cursor_saturates() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('v'));
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!(app.view_cursor, ViewSetting::ALL.len() - 1);
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Char('k'));
+        }
+        assert_eq!(app.view_cursor, 0);
+    }
+
+    #[test]
+    fn the_menu_reports_the_current_state() {
+        let (_d, mut app) = disk_app(DOC);
+        assert!(!app.view_setting(ViewSetting::Wrap));
+        app.wrap = true;
+        assert!(app.view_setting(ViewSetting::Wrap));
+        assert!(!app.view_setting(ViewSetting::HideDone));
+    }
+
+    #[test]
+    fn normal_keys_do_not_act_while_the_menu_is_open() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.mode, Mode::ViewMenu, "d did not open the delete prompt");
+        assert_eq!(read(&app), DOC);
+    }
+
+    #[test]
+    fn wrap_survives_a_restart() {
+        let (dir, mut app) = disk_app(DOC);
+        let config_path = dir.path().join("config.toml");
+        app.config.save(&config_path).unwrap();
+        app = app.with_config_path(&config_path);
+
+        press(&mut app, KeyCode::Char('v'));
+        press(&mut app, KeyCode::Char(' '));
+        app.persist_ui_state();
+
+        let reloaded = Config::load(&config_path).unwrap();
+        assert!(reloaded.ui.wrap, "wrap remembered");
+        assert!(
+            App::new(app.workspace.clone(), reloaded).wrap,
+            "and restored"
+        );
+    }
+
     // --- mouse ---
 
     fn mouse(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
@@ -1616,9 +1821,19 @@ mod tests {
         }
     }
 
-    /// Give the app a known layout, as though a frame had been drawn.
+    /// Draw a real frame headlessly, so layout and row mapping match what the
+    /// mouse handler would see in a live terminal.
     fn with_layout(app: &mut App) {
-        app.layout = view::split_with(Rect::new(0, 0, 100, 24), false, None);
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        let mut drawn = None;
+        terminal
+            .draw(|frame| drawn = Some(view::render(app, frame)))
+            .unwrap();
+        let rendered = drawn.unwrap();
+        app.layout = rendered.frames;
+        app.item_rows = rendered.item_rows;
     }
 
     #[test]
@@ -1793,6 +2008,79 @@ mod tests {
         ));
         assert_eq!(app.mode, Mode::Modal, "the click did not fall through");
         assert_eq!(app.item_cursor, 0);
+    }
+
+    #[test]
+    fn clicking_the_view_tab_opens_the_menu() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let tab = view::view_tab_rect(app.layout.top_bar);
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            tab.x + 1,
+            tab.y,
+        ));
+        assert_eq!(app.mode, Mode::ViewMenu);
+    }
+
+    #[test]
+    fn clicking_a_menu_entry_toggles_it() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        press(&mut app, KeyCode::Char('v'));
+        with_layout(&mut app);
+        let menu = view::view_menu_rect(app.layout.top_bar);
+
+        // First content row is "wrap long text".
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            menu.x + 4,
+            menu.y + 1,
+        ));
+        assert!(app.wrap);
+    }
+
+    #[test]
+    fn clicking_away_closes_the_menu() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        press(&mut app, KeyCode::Char('v'));
+        with_layout(&mut app);
+
+        let items = app.layout.items;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            items.y + items.height - 2,
+        ));
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn clicking_a_wrapped_items_second_row_still_selects_that_item() {
+        let long = "- [ ] ".to_string()
+            + &"a very long item that will certainly need to be wrapped across rows ".repeat(3)
+            + "\n- [ ] second\n";
+        let (_d, mut app) = disk_app(&format!("## P0 — Critical\n\n{long}"));
+        app.wrap = true;
+        with_layout(&mut app);
+
+        // The first item occupies several rows; row 1 is its continuation.
+        assert!(app.item_rows.len() > 2);
+        assert_eq!(app.item_rows[0], 0);
+        assert_eq!(app.item_rows[1], 0, "continuation row belongs to item 0");
+
+        let items = app.layout.items;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            items.x + 5,
+            items.y + 2,
+        ));
+        assert_eq!(
+            app.item_cursor, 0,
+            "clicking a continuation row selects its item"
+        );
     }
 
     #[test]

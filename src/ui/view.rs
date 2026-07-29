@@ -6,7 +6,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use chrono::Local;
 
-use super::{App, Focus, Mode, chyron, viewport_start};
+use super::wrap::{truncate, wrap_text};
+use super::{App, Focus, Mode, ViewSetting, chyron, viewport_start};
 
 /// Short deadline marker, and whether it is already past.
 fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
@@ -78,7 +79,14 @@ pub fn split_with(area: Rect, command_line_visible: bool, items_height: Option<u
 ///
 /// Returns the layout it used, so mouse events can be hit-tested against the
 /// panes actually on screen rather than a guess.
-pub fn render(app: &App, frame: &mut Frame) -> Frames {
+/// What a frame produced: its layout, and which item each item-pane row shows.
+#[derive(Debug, Clone, Default)]
+pub struct Rendered {
+    pub frames: Frames,
+    pub item_rows: Vec<usize>,
+}
+
+pub fn render(app: &App, frame: &mut Frame) -> Rendered {
     let editing = matches!(
         app.mode,
         Mode::EditingQuery | Mode::Editing(_) | Mode::AskingAgent(_)
@@ -86,14 +94,20 @@ pub fn render(app: &App, frame: &mut Frame) -> Frames {
     let f = split_with(frame.area(), editing, app.items_height);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
-    render_items(app, frame, f.items);
+    let item_rows = render_items(app, frame, f.items);
     render_detail(app, frame, f.detail);
     if editing {
         render_command_line(app, frame, f.command_line);
     }
     render_status(app, frame, f.status);
     render_overlay(app, frame, frame.area());
-    f
+    if app.mode == Mode::ViewMenu {
+        render_view_menu(app, frame, f.top_bar);
+    }
+    Rendered {
+        frames: f,
+        item_rows,
+    }
 }
 
 /// Modal and change-set review share one centred overlay.
@@ -182,8 +196,91 @@ fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
             theme.query(),
         ));
     }
+    // The view tab sits at the right edge; `view_tab_rect` must agree with
+    // this padding for clicks to land on it.
+    let label = view_tab_label();
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let gap = (area.width as usize)
+        .saturating_sub(used)
+        .saturating_sub(label.chars().count());
+    spans.push(Span::styled(" ".repeat(gap), theme.statusbar()));
+    spans.push(Span::styled(
+        label,
+        if app.mode == Mode::ViewMenu {
+            theme.selected(&theme.statusbar())
+        } else {
+            theme.header()
+        },
+    ));
+
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(theme.statusbar()),
+        area,
+    );
+}
+
+pub fn view_tab_label() -> String {
+    " view ▾ ".to_string()
+}
+
+/// Where the view tab was drawn, for mouse hit-testing.
+pub fn view_tab_rect(top_bar: Rect) -> Rect {
+    let width = view_tab_label().chars().count() as u16;
+    Rect {
+        x: top_bar.x + top_bar.width.saturating_sub(width),
+        y: top_bar.y,
+        width: width.min(top_bar.width),
+        height: 1,
+    }
+}
+
+/// Where the view menu is drawn, so clicks can be routed to its entries.
+pub fn view_menu_rect(top_bar: Rect) -> Rect {
+    let width = 30u16.min(top_bar.width);
+    let tab = view_tab_rect(top_bar);
+    Rect {
+        x: tab.x.saturating_sub(width.saturating_sub(tab.width)),
+        y: top_bar.y + 1,
+        width,
+        height: ViewSetting::ALL.len() as u16 + 2,
+    }
+}
+
+/// The view-settings menu, drawn under its tab.
+fn render_view_menu(app: &App, frame: &mut Frame, top_bar: Rect) {
+    let theme = &app.theme;
+    let area = view_menu_rect(top_bar);
+
+    let lines: Vec<Line> = ViewSetting::ALL
+        .iter()
+        .enumerate()
+        .map(|(index, setting)| {
+            let selected = index == app.view_cursor;
+            let style = if selected {
+                theme.selected(&Style::default())
+            } else {
+                theme.paragraph()
+            };
+            let mark = if app.view_setting(*setting) { "x" } else { " " };
+            Line::from(Span::styled(
+                format!(
+                    "{}[{mark}] {}",
+                    if selected { "▸ " } else { "  " },
+                    setting.label()
+                ),
+                style,
+            ))
+        })
+        .collect();
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title("view"),
+        ),
         area,
     );
 }
@@ -235,55 +332,114 @@ fn render_groups(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_items(app: &App, frame: &mut Frame, area: Rect) {
+/// One rendered row of the item list, and which item it belongs to.
+struct ItemRow {
+    item_index: usize,
+    line: String,
+    style_done: bool,
+    due: Option<(String, bool)>,
+    /// True for the first row of an item; continuation rows repeat no prefix.
+    head: bool,
+}
+
+/// Lay the visible items out as rows, wrapping when enabled.
+///
+/// Returns the rows plus the row index each item starts at, which is what lets
+/// the viewport keep the cursor visible and a click map back to an item.
+fn layout_items(app: &App, width: usize) -> (Vec<ItemRow>, Vec<usize>) {
+    let mut rows = Vec::new();
+    let mut starts = Vec::new();
+
+    for (index, item) in app.visible_items().iter().enumerate() {
+        starts.push(rows.len());
+        let mark = if item.done { "x" } else { " " };
+        let due = due_label(item);
+        let prefix_width = 2 + item.indent + 4 + 4 + due.as_ref().map_or(0, |_| 8);
+        let avail = width.saturating_sub(prefix_width).max(1);
+
+        let segments = if app.wrap {
+            wrap_text(&item.text, avail)
+        } else {
+            vec![truncate(&item.text, avail)]
+        };
+
+        for (n, segment) in segments.into_iter().enumerate() {
+            rows.push(ItemRow {
+                item_index: index,
+                line: if n == 0 {
+                    format!(
+                        "{}[{mark}] {:<3} ",
+                        " ".repeat(item.indent),
+                        item.priority.as_str()
+                    ) + &segment
+                } else {
+                    " ".repeat(prefix_width.saturating_sub(2)) + &segment
+                },
+                style_done: item.done,
+                due: if n == 0 { due.clone() } else { None },
+                head: n == 0,
+            });
+        }
+    }
+    (rows, starts)
+}
+
+fn render_items(app: &App, frame: &mut Frame, area: Rect) -> Vec<usize> {
     let theme = &app.theme;
     let focused = app.focus == Focus::Items;
     let height = area.height.saturating_sub(2) as usize;
-    let items = app.visible_items();
-    let start = viewport_start(app.item_cursor, items.len(), height);
+    let width = area.width.saturating_sub(2) as usize;
 
-    let lines: Vec<Line> = items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(height)
-        .map(|(index, item)| {
-            let selected = index == app.item_cursor;
-            let mut style: Style = if item.done {
-                theme.read(&Style::default())
+    let (rows, starts) = layout_items(app, width);
+    // Scroll by rendered row so a wrapped item is not half-shown.
+    let cursor_row = starts.get(app.item_cursor).copied().unwrap_or(0);
+    let start = viewport_start(cursor_row, rows.len(), height);
+
+    let mut lines = Vec::new();
+    let mut row_items = Vec::new();
+    for row in rows.iter().skip(start).take(height) {
+        let selected = row.item_index == app.item_cursor;
+        let mut style: Style = if row.style_done {
+            theme.read(&Style::default())
+        } else {
+            theme.unread(&Style::default())
+        };
+        if selected {
+            style = theme.selected(&style);
+        }
+
+        let mut spans = vec![Span::styled(
+            if selected && row.head { "▸ " } else { "  " }.to_string(),
+            style,
+        )];
+        if let Some((label, overdue)) = &row.due {
+            let due_style = if *overdue {
+                theme.flagged(&style)
             } else {
-                theme.unread(&Style::default())
+                theme.highlighted(&style)
             };
-            if selected {
-                style = theme.selected(&style);
-            }
-            let mark = if item.done { "x" } else { " " };
-            let mut spans = vec![Span::styled(
-                format!(
-                    "{}{}[{mark}] {:<3} ",
-                    if selected { "▸ " } else { "  " },
-                    " ".repeat(item.indent),
-                    item.priority.as_str(),
-                ),
-                style,
-            )];
-            if let Some((label, overdue)) = due_label(item) {
-                let due_style = if overdue {
-                    theme.flagged(&style)
-                } else {
-                    theme.highlighted(&style)
-                };
-                spans.push(Span::styled(format!("{label:<7} "), due_style));
-            }
-            spans.push(Span::styled(item.text.clone(), style));
-            Line::from(spans)
-        })
-        .collect();
+            // The label sits between the priority and the text.
+            let (before, after) = row.line.split_at(
+                row.line
+                    .char_indices()
+                    .nth(row.line.chars().take_while(|c| *c != ']').count() + 5)
+                    .map_or(row.line.len(), |(i, _)| i),
+            );
+            spans.push(Span::styled(before.to_string(), style));
+            spans.push(Span::styled(format!("{label:<7} "), due_style));
+            spans.push(Span::styled(after.to_string(), style));
+        } else {
+            spans.push(Span::styled(row.line.clone(), style));
+        }
+        lines.push(Line::from(spans));
+        row_items.push(row.item_index);
+    }
 
-    let title = if items.is_empty() {
+    let count = app.visible_items().len();
+    let title = if count == 0 {
         "items (none)".to_string()
     } else {
-        format!("items {}/{}", app.item_cursor + 1, items.len())
+        format!("items {}/{}", app.item_cursor + 1, count)
     };
 
     frame.render_widget(
@@ -295,6 +451,7 @@ fn render_items(app: &App, frame: &mut Frame, area: Rect) {
         ),
         area,
     );
+    row_items
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
@@ -336,13 +493,17 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
         None => vec![Line::from("")],
     };
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme.eff_border(false))
+        .title("detail");
+    let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(theme.eff_border(false))
-                .title("detail"),
-        ),
+        if app.wrap {
+            paragraph.wrap(ratatui::widgets::Wrap { trim: false })
+        } else {
+            paragraph
+        },
         area,
     );
 }
@@ -381,6 +542,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         (None, None, Mode::ReviewingChangeSet) => Line::from(Span::styled(
             " apply this change-set? y / n ".to_string(),
             theme.tooltip_warning(),
+        )),
+        (None, None, Mode::ViewMenu) => Line::from(Span::styled(
+            " j/k move · space toggle · esc close ".to_string(),
+            theme.statusbar(),
         )),
         (None, None, Mode::Modal) => Line::from(Span::styled(
             " any key to dismiss ".to_string(),

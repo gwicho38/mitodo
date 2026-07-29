@@ -136,12 +136,39 @@ entirely.
 | `s` | git sync | `c` | scrolling ticker |
 | `N` | read group notes | `X` | archive finished items |
 | `p` | pause the ticker | `+` `-` | ticker speed |
-| `?` | help | `q` | quit |
+| `v` | view settings | `?` | help |
+| | | `q` | quit |
 
 Mouse works too: click to select a row, wheel to scroll the pane under the
 pointer, and drag the divider between the item list and the detail pane to
 resize them. Set `ui.mouse = false` to hand selection and scrollback back to
 your terminal.
+
+## View settings
+
+`v` — or clicking **view ▾** in the top bar — opens a small menu of display
+toggles. `j`/`k` moves, `space` toggles, `esc` closes, and clicking an entry
+works too.
+
+| setting | what it does |
+|---|---|
+| wrap long text | show the whole item across several rows instead of cutting it at the pane edge |
+| hide finished items | same as `h` |
+| scrolling ticker | same as `c` |
+
+All three are remembered between runs.
+
+```
+  mitodo   all · 100 open / 278 shown                            view ▾
+┌groups──────────────┐┌items 1/278──────────────────────────────────────┐
+│▸ all        100    ││▸ [x] P0  ~~Phase A — Demand for Engagement~~ —  │
+│  everlongtech 38   ││          Mooted; proceeded directly to Notice   │
+│  holon       13    ││          of Termination per Luis's Mar 4 note.  │
+```
+
+Wrapping keeps the cursor and the mouse honest: scrolling moves by rendered
+row so a wrapped item is never half-shown, and clicking any row of a wrapped
+item selects that item.
 
 ## Queries
 

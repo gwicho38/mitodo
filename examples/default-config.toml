@@ -60,6 +60,8 @@ ticker    = false
 # Capture the mouse for click, scroll and divider drag. Turning this off gives
 # your terminal back its own selection and scrollback.
 mouse     = true
+# Wrap long item text across several rows instead of cutting it off.
+wrap      = false
 
 # --------------------------------------------------------------------------
 # Optional: an external agent.
