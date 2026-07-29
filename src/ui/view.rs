@@ -30,6 +30,8 @@ fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
 /// popups in without moving anything.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Frames {
+    /// The whole frame, which the centred overlays are positioned against.
+    pub whole: Rect,
     pub top_bar: Rect,
     pub groups: Rect,
     pub items: Rect,
@@ -73,6 +75,7 @@ pub fn split_with(
         .areas(right);
 
     Frames {
+        whole: area,
         top_bar,
         groups,
         items,
@@ -126,18 +129,132 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
 }
 
 /// Modal and change-set review share one centred overlay.
+/// Where the review list is drawn, so clicks can reach its rows.
+pub fn review_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(8).clamp(20, 110);
+    let height = area.height.saturating_sub(4).clamp(6, 24);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// How many change rows the review list can show at once.
+///
+/// The modal spends rows on its border, the summary, and the reason footer.
+pub fn review_visible_rows(area: Rect) -> usize {
+    review_rect(area).height.saturating_sub(6) as usize
+}
+
+/// First content row of the review list, for hit-testing clicks.
+pub fn review_first_row(area: Rect) -> u16 {
+    // Border, then the summary line.
+    review_rect(area).y + 2
+}
+
+/// The proposed change-set, as a list you can pick from.
+fn render_review(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    let Some(set) = &app.pending else {
+        return;
+    };
+    let popup = review_rect(area);
+    let height = review_visible_rows(area);
+    let width = popup.width.saturating_sub(2) as usize;
+    let total = set.changes.len();
+    let start = clamp_scroll(app.review_scroll, total, height);
+
+    let chosen = app.review_selected.iter().filter(|s| **s).count();
+    let mut lines = vec![Line::from(Span::styled(
+        if set.summary.is_empty() {
+            format!("{chosen} of {total} selected")
+        } else {
+            format!("{} — {chosen} of {total} selected", set.summary)
+        },
+        theme.header(),
+    ))];
+
+    if total == 0 {
+        lines.push(Line::from(Span::styled(
+            "no changes proposed".to_string(),
+            theme.paragraph(),
+        )));
+    }
+
+    for index in start..(start + height).min(total) {
+        let highlighted = index == app.review_cursor;
+        let picked = app.review_selected.get(index).copied().unwrap_or(false);
+        let mut style = if picked {
+            theme.paragraph()
+        } else {
+            theme.inactive()
+        };
+        if highlighted {
+            style = theme.selected(&style);
+        }
+        // One row each, so a click maps to a change unambiguously; the text is
+        // cut rather than wrapped, and the full text is shown below.
+        let prefix = format!(
+            "{}[{}] ",
+            if highlighted { "▸ " } else { "  " },
+            if picked { "x" } else { " " }
+        );
+        let room = width.saturating_sub(prefix.chars().count()).max(1);
+        lines.push(Line::from(Span::styled(
+            format!("{prefix}{}", truncate(&set.row(index), room)),
+            style,
+        )));
+    }
+
+    // The highlighted change in full, wrapped, with why it was proposed.
+    if total > 0 {
+        lines.push(Line::from(""));
+        for line in wrap_text(&set.row(app.review_cursor), width) {
+            lines.push(Line::from(Span::styled(line, theme.header())));
+        }
+        let reason = set.reason(app.review_cursor);
+        if !reason.is_empty() {
+            for line in wrap_text(&format!("why: {reason}"), width) {
+                lines.push(Line::from(Span::styled(line, theme.paragraph())));
+            }
+        }
+    }
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title("review — space picks · a all · enter applies · esc discards"),
+        ),
+        popup,
+    );
+}
+
 fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
-    let (title, body) = match (&app.modal, &app.pending, app.mode) {
-        (_, Some(set), Mode::ReviewingChangeSet) => {
-            ("review change-set".to_string(), set.review_lines())
-        }
-        (Some((title, body)), _, Mode::Modal) => (title.clone(), body.clone()),
-        _ => return,
+    if app.mode == Mode::ReviewingChangeSet {
+        render_review(app, frame, area);
+        return;
+    }
+    let Some((title, body)) = &app.modal else {
+        return;
     };
+    if app.mode != Mode::Modal {
+        return;
+    }
 
     let width = area.width.saturating_sub(8).clamp(20, 100);
-    let height = (body.len() as u16 + 2)
+    let inner = width.saturating_sub(2) as usize;
+    // Wrap so a long line is readable rather than cut at the border.
+    let wrapped: Vec<String> = body
+        .iter()
+        .flat_map(|line| wrap_text(line, inner))
+        .collect();
+    let height = (wrapped.len() as u16 + 2)
         .min(area.height.saturating_sub(4))
         .max(3);
     let popup = Rect {
@@ -150,7 +267,8 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(
-            body.iter()
+            wrapped
+                .iter()
                 .map(|l| Line::from(Span::styled(l.clone(), theme.paragraph())))
                 .collect::<Vec<_>>(),
         )
@@ -158,7 +276,7 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme.eff_border(true))
-                .title(title),
+                .title(title.clone()),
         ),
         popup,
     );

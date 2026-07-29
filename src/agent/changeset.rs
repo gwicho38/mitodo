@@ -21,6 +21,16 @@ pub enum ChangeAction {
     Update,
 }
 
+impl ChangeAction {
+    pub fn glyph(self) -> &'static str {
+        match self {
+            ChangeAction::Add => "+ add",
+            ChangeAction::Complete => "✓ done",
+            ChangeAction::Update => "~ edit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Change {
     pub file: String,
@@ -45,27 +55,39 @@ impl ChangeSet {
         serde_json::from_str(json.trim())
     }
 
-    /// One display line per change, for the review modal.
-    pub fn review_lines(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if !self.summary.is_empty() {
-            lines.push(self.summary.clone());
-            lines.push(String::new());
+    /// A one-line summary of a change, for the review list.
+    pub fn row(&self, index: usize) -> String {
+        match self.changes.get(index) {
+            None => String::new(),
+            Some(change) => format!(
+                "{} {} · {}",
+                change.action.glyph(),
+                change.file,
+                change.content.trim().trim_start_matches("- [ ]").trim()
+            ),
         }
-        for (index, change) in self.changes.iter().enumerate() {
-            let verb = match change.action {
-                ChangeAction::Add => "+ add     ",
-                ChangeAction::Complete => "✓ complete",
-                ChangeAction::Update => "~ update  ",
-            };
-            lines.push(format!("{:>2}. {verb} {}", index + 1, change.file));
-            lines.push(format!("     {}", change.content));
-            lines.push(format!("     why: {}", change.reason));
+    }
+
+    /// Why the agent proposed the change at `index`.
+    pub fn reason(&self, index: usize) -> String {
+        self.changes
+            .get(index)
+            .map(|c| c.reason.clone())
+            .unwrap_or_default()
+    }
+
+    /// A copy carrying only the changes at the given positions.
+    pub fn selected(&self, keep: &[bool]) -> ChangeSet {
+        ChangeSet {
+            changes: self
+                .changes
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| keep.get(*index).copied().unwrap_or(false))
+                .map(|(_, change)| change.clone())
+                .collect(),
+            summary: self.summary.clone(),
         }
-        if self.changes.is_empty() {
-            lines.push("no changes proposed".to_string());
-        }
-        lines
     }
 }
 
@@ -200,20 +222,39 @@ mod tests {
     }
 
     #[test]
-    fn review_lines_describe_every_change() {
+    fn a_row_describes_its_change() {
         let parsed = set(r#"{"summary":"S","changes":[
-                {"file":"lefv.md","action":"add","content":"new","reason":"because"}]}"#);
-        let text = parsed.review_lines().join("\n");
-        assert!(text.contains("S"));
-        assert!(text.contains("add"));
-        assert!(text.contains("lefv.md"));
-        assert!(text.contains("because"));
+                {"file":"lefv.md","action":"add","content":"- [ ] new thing","reason":"because"}]}"#);
+        let row = parsed.row(0);
+        assert!(row.contains("add"), "the action: {row}");
+        assert!(row.contains("lefv.md"), "the file");
+        assert!(row.contains("new thing"), "the text, without the checkbox");
+        assert_eq!(parsed.reason(0), "because");
     }
 
     #[test]
-    fn an_empty_change_set_says_so() {
-        let parsed = ChangeSet::default();
-        assert!(parsed.review_lines().join("\n").contains("no changes"));
+    fn selecting_keeps_only_the_marked_changes() {
+        let parsed = set(r#"{"summary":"S","changes":[
+                {"file":"a.md","action":"add","content":"one","reason":"r"},
+                {"file":"b.md","action":"add","content":"two","reason":"r"},
+                {"file":"c.md","action":"add","content":"three","reason":"r"}]}"#);
+        let kept = parsed.selected(&[true, false, true]);
+        assert_eq!(kept.changes.len(), 2);
+        assert_eq!(kept.changes[0].file, "a.md");
+        assert_eq!(kept.changes[1].file, "c.md");
+    }
+
+    #[test]
+    fn selecting_nothing_yields_an_empty_change_set() {
+        let parsed = set(r#"{"summary":"","changes":[
+                {"file":"a.md","action":"add","content":"one","reason":"r"}]}"#);
+        assert!(parsed.selected(&[false]).changes.is_empty());
+    }
+
+    #[test]
+    fn a_row_past_the_end_is_empty_rather_than_panicking() {
+        assert_eq!(ChangeSet::default().row(3), "");
+        assert_eq!(ChangeSet::default().reason(3), "");
     }
 
     #[test]

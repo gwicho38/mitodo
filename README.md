@@ -264,8 +264,28 @@ Prompt templates get two placeholders: `{items}` is the view as rendered, and
 agent that never saw the paths cannot produce a usable one. `{input}` is
 whatever you typed.
 
-Anything that writes shows you a diff first and applies through the same
-conflict-aware writer, so a stale proposal is refused rather than forced.
+Anything that writes shows you the proposals first, as a list you pick from:
+
+```
+┌review — space picks · a all · enter applies · esc discards ──────────────┐
+│found 4 actionable items across your inboxes — 3 of 4 selected            │
+│▸ [x] + add w/TODO.md · Reply to opposing counsel about the discovery…    │
+│  [ ] + add w/TODO.md · File the 83(b) election                           │
+│  [x] ✓ done w/TODO.md · alpha                                            │
+│                                                                          │
+│+ add w/TODO.md · Reply to opposing counsel about the discovery deadline  │
+│extension request they sent Tuesday                                       │
+│why: email from David Ashcraft, 2 days old, asks for a response this week │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+Everything starts picked. `j`/`k` moves, `space` picks one, `a` toggles all,
+`enter` applies what is selected and `esc` throws the lot away — and clicking a
+row works too. The highlighted change is shown in full below the list, wrapped,
+with the agent's reason for proposing it.
+
+Applying goes through the same conflict-aware writer, so a stale proposal is
+refused rather than forced.
 
 While an agent is running the status bar says so, with a spinner and a clock:
 

@@ -176,6 +176,10 @@ pub struct App {
     pub modal: Option<(String, Vec<String>)>,
     /// Change-set awaiting review.
     pub pending: Option<ChangeSet>,
+    /// Which proposed changes are picked, and where the cursor is in the list.
+    pub review_selected: Vec<bool>,
+    pub review_cursor: usize,
+    pub review_scroll: usize,
     /// The background task in flight, if any.
     pub busy: Option<Busy>,
     /// Scrolling ticker, when enabled.
@@ -233,6 +237,9 @@ impl App {
             notice: None,
             modal: None,
             pending: None,
+            review_selected: Vec::new(),
+            review_cursor: 0,
+            review_scroll: 0,
             busy: None,
             ticker,
             wrap: config_wrap,
@@ -401,6 +408,11 @@ impl App {
             }
             Message::Event(Event::ChangeSetProposed(set)) => {
                 self.busy = None;
+                // Everything starts picked: the common case is accepting the
+                // lot, and unpicking is easier than picking from nothing.
+                self.review_selected = vec![true; set.changes.len()];
+                self.review_cursor = 0;
+                self.review_scroll = 0;
                 self.pending = Some(set);
                 self.mode = Mode::ReviewingChangeSet;
             }
@@ -476,17 +488,119 @@ impl App {
     }
 
     fn handle_review_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let last = self
+            .pending
+            .as_ref()
+            .map_or(0, |s| s.changes.len())
+            .saturating_sub(1);
+        match key.code {
+            K::Esc | K::Char('q') | K::Char('n') => {
+                self.mode = Mode::Normal;
+                self.pending = None;
+                self.notice = Some("change-set discarded".to_string());
+            }
+            K::Char('j') | K::Down => {
+                self.review_cursor = (self.review_cursor + 1).min(last);
+                self.follow_review_cursor();
+            }
+            K::Char('k') | K::Up => {
+                self.review_cursor = self.review_cursor.saturating_sub(1);
+                self.follow_review_cursor();
+            }
+            K::Char('g') => {
+                self.review_cursor = 0;
+                self.follow_review_cursor();
+            }
+            K::Char('G') => {
+                self.review_cursor = last;
+                self.follow_review_cursor();
+            }
+            K::Char(' ') => self.toggle_review_at(self.review_cursor),
+            K::Char('a') | K::Char('A') => {
+                // All or nothing, whichever is the bigger change.
+                let all_on = self.review_selected.iter().all(|s| *s);
+                self.review_selected.iter_mut().for_each(|s| *s = !all_on);
+            }
+            K::Enter | K::Char('y') | K::Char('Y') => self.apply_review(),
+            _ => {}
+        }
+    }
+
+    /// Clicks and scrolling inside the review list.
+    fn handle_review_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16) {
+        let total = self.pending.as_ref().map_or(0, |s| s.changes.len());
+        let height = view::review_visible_rows(self.layout.whole);
+        match kind {
+            MouseEventKind::ScrollDown => {
+                self.review_scroll = scroll_by(self.review_scroll, SCROLL_STEP, total, height);
+            }
+            MouseEventKind::ScrollUp => {
+                self.review_scroll = scroll_by(self.review_scroll, -SCROLL_STEP, total, height);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(index) = self.review_row_at(x, y) {
+                    self.toggle_review_at(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Which proposed change sits under this point, if any.
+    fn review_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        let popup = view::review_rect(self.layout.whole);
+        if !within(popup, x, y) {
+            return None;
+        }
+        let first = view::review_first_row(self.layout.whole);
+        let height = view::review_visible_rows(self.layout.whole);
+        if y < first || y >= first + height as u16 {
+            return None;
+        }
+        let total = self.pending.as_ref().map_or(0, |s| s.changes.len());
+        let index = self.review_scroll + (y - first) as usize;
+        (index < total).then_some(index)
+    }
+
+    fn toggle_review_at(&mut self, index: usize) {
+        if let Some(slot) = self.review_selected.get_mut(index) {
+            *slot = !*slot;
+            self.review_cursor = index;
+        }
+    }
+
+    fn follow_review_cursor(&mut self) {
+        let height = view::review_visible_rows(self.layout.whole);
+        if height == 0 {
+            return;
+        }
+        if self.review_cursor < self.review_scroll {
+            self.review_scroll = self.review_cursor;
+        } else if self.review_cursor >= self.review_scroll + height {
+            self.review_scroll = self.review_cursor + 1 - height;
+        }
+    }
+
+    /// Apply the picked changes and report what happened.
+    fn apply_review(&mut self) {
         self.mode = Mode::Normal;
         let Some(set) = self.pending.take() else {
             return;
         };
-        if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
-            self.notice = Some("change-set discarded".to_string());
+        let picked = set.selected(&self.review_selected);
+        if picked.changes.is_empty() {
+            self.notice = Some("nothing selected; no changes applied".to_string());
             return;
         }
-        let report = agent::changeset::apply(&self.workspace.root, &self.workspace.items, &set);
+
+        let report = agent::changeset::apply(&self.workspace.root, &self.workspace.items, &picked);
         self.reload();
-        let mut body = vec![format!("applied {} change(s)", report.applied)];
+        let mut body = vec![format!(
+            "applied {} of {} proposed change(s)",
+            report.applied,
+            set.changes.len()
+        )];
         body.extend(report.skipped.iter().map(|s| format!("skipped: {s}")));
         self.open_modal("apply", body);
     }
@@ -651,11 +765,17 @@ impl App {
             self.notice = None;
         }
 
-        // The view menu is the one overlay that takes clicks.
+        // The view menu is one of two overlays that take clicks.
         if self.mode == Mode::ViewMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.click_view_menu(x, y);
             }
+            return;
+        }
+
+        // The review list is the other: pick changes with the mouse.
+        if self.mode == Mode::ReviewingChangeSet {
+            self.handle_review_mouse(mouse.kind, x, y);
             return;
         }
 
@@ -2718,6 +2838,151 @@ mod tests {
         app.handle(Message::Event(Event::ChangeSetProposed(set)));
         assert_eq!(app.mode, Mode::ReviewingChangeSet);
         assert_eq!(read(&app), DOC, "nothing written before review");
+    }
+
+    fn proposed(app: &mut App, n: usize) {
+        let changes: Vec<String> = (0..n)
+            .map(|i| {
+                format!(
+                    r#"{{"file":"lefv/TODO.md","action":"add","content":"proposal {i}","reason":"r{i}"}}"#
+                )
+            })
+            .collect();
+        let json = format!(
+            r#"{{"summary":"found {n}","changes":[{}]}}"#,
+            changes.join(",")
+        );
+        let set = ChangeSet::parse(&json).unwrap();
+        app.handle(Message::Event(Event::ChangeSetProposed(set)));
+    }
+
+    #[test]
+    fn everything_starts_picked() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        assert_eq!(app.review_selected, vec![true, true, true]);
+        assert_eq!(app.review_cursor, 0);
+    }
+
+    #[test]
+    fn space_unpicks_a_single_change() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' '));
+        assert_eq!(app.review_selected, vec![true, false, true]);
+    }
+
+    #[test]
+    fn a_toggles_everything_at_once() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.review_selected, vec![false, false, false]);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.review_selected, vec![true, true, true]);
+    }
+
+    #[test]
+    fn only_the_picked_changes_are_applied() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' ')); // unpick the second
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let text = read(&app);
+        assert!(text.contains("proposal 0"), "picked one applied");
+        assert!(!text.contains("proposal 1"), "unpicked one skipped");
+        assert!(text.contains("proposal 2"), "picked one applied");
+    }
+
+    #[test]
+    fn the_report_counts_against_what_was_proposed() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        press(&mut app, KeyCode::Char(' ')); // unpick the first
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let (_title, body) = app.modal.clone().unwrap();
+        assert!(
+            body[0].contains("2 of 3"),
+            "says what it did and what was offered: {body:?}"
+        );
+    }
+
+    #[test]
+    fn picking_nothing_applies_nothing() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 2);
+        press(&mut app, KeyCode::Char('a')); // none
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(read(&app), DOC, "file untouched");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nothing selected")
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_toggles_that_change() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        with_layout(&mut app);
+
+        let first = view::review_first_row(app.layout.whole);
+        let popup = view::review_rect(app.layout.whole);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            popup.x + 5,
+            first + 1,
+        ));
+        assert_eq!(
+            app.review_selected,
+            vec![true, false, true],
+            "clicked the second"
+        );
+        assert_eq!(app.review_cursor, 1, "and highlighted it");
+    }
+
+    #[test]
+    fn clicking_outside_the_rows_changes_nothing() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 2);
+        with_layout(&mut app);
+
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 0, 0));
+        assert_eq!(app.review_selected, vec![true, true]);
+        assert_eq!(app.mode, Mode::ReviewingChangeSet, "and does not discard");
+    }
+
+    #[test]
+    fn a_long_list_scrolls_in_the_review() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 60);
+        with_layout(&mut app);
+        let popup = view::review_rect(app.layout.whole);
+
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, popup.x + 5, popup.y + 3));
+        assert_eq!(app.review_scroll, SCROLL_STEP as usize);
+    }
+
+    #[test]
+    fn esc_discards_without_writing() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 2);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("discarded")
+        );
     }
 
     #[test]
