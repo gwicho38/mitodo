@@ -136,7 +136,8 @@ entirely.
 | `s` | git sync | `c` | scrolling ticker |
 | `N` | read group notes | `X` | archive finished items |
 | `p` | pause the ticker | `+` `-` | ticker speed |
-| `v` | view settings | `?` | help |
+| `z` `Z` | fold / fold all | `v` | view settings |
+| | | `?` | help |
 | | | `q` | quit |
 
 Mouse works too: click to select a row, wheel to scroll the pane under the
@@ -219,6 +220,22 @@ Anything markdown already does:
 Checkbox lines are items, indented ones are children, and indented `>` lines
 beneath an item are its description. Everything else in the file — frontmatter,
 prose, headings, horizontal rules — is left exactly as it was.
+
+Nesting goes as deep as you like, and the list behaves like a file tree:
+
+```
+▾ [ ] P0  parent one
+    ▾ [ ] P0  child a
+        [ ] P0  grandchild
+      [ ] P0  child b
+    [ ] P0  parent two
+```
+
+`z` folds or unfolds the selected node, `Z` does the lot, and clicking the
+`▾`/`▸` marker of the selected node works too. Folding a node hides its whole
+subtree, however deep. `A` adds a child to the selected item.
+
+Clicking the detail pane edits that item's notes, the same as pressing `i`.
 
 ## Editing safely alongside other tools
 

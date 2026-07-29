@@ -560,7 +560,9 @@ fn layout_items(app: &App, width: usize) -> (Vec<ItemRow>, Vec<usize>) {
         starts.push(rows.len());
         let mark = if item.done { "x" } else { " " };
         let due = due_label(item);
-        let prefix_width = 2 + item.indent + 4 + 4 + due.as_ref().map_or(0, |_| 8);
+        let fold = app.fold_state(item);
+        // Two columns for the fold marker, so leaves line up under nodes.
+        let prefix_width = 2 + item.indent + 2 + 4 + 4 + due.as_ref().map_or(0, |_| 8);
         let avail = width.saturating_sub(prefix_width).max(1);
 
         let segments = if app.wrap {
@@ -574,8 +576,13 @@ fn layout_items(app: &App, width: usize) -> (Vec<ItemRow>, Vec<usize>) {
                 item_index: index,
                 line: if n == 0 {
                     format!(
-                        "{}[{mark}] {:<3} ",
+                        "{}{} [{mark}] {:<3} ",
                         " ".repeat(item.indent),
+                        match fold {
+                            Some(true) => "▸",
+                            Some(false) => "▾",
+                            None => " ",
+                        },
                         item.priority.as_str()
                     ) + &segment
                 } else {
@@ -705,8 +712,19 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
                     theme.paragraph(),
                 )),
             ];
-            if !item.description.is_empty() {
-                lines.push(Line::from(""));
+            if !item.children.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("{} sub-item(s)", item.children.len()),
+                    theme.paragraph(),
+                )));
+            }
+            lines.push(Line::from(""));
+            if item.description.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "no notes — click here or press i to write some".to_string(),
+                    theme.inactive(),
+                )));
+            } else {
                 lines.extend(
                     item.description
                         .lines()
@@ -983,7 +1001,10 @@ mod tests {
     #[test]
     fn marks_the_selected_item_with_a_cursor() {
         let rows = draw(80, 24).join("\n");
-        assert!(rows.contains("▸ [ ] P0  file the 83(b)"), "cursor on row 0");
+        assert!(
+            rows.contains("▸   [ ] P0  file the 83(b)"),
+            "cursor on row 0"
+        );
     }
 
     #[test]

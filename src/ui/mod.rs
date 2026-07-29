@@ -18,7 +18,7 @@ use crate::messages::{Event, Message};
 use crate::prelude::*;
 use crate::query::Query;
 use crate::store::Workspace;
-use crate::store::model::{Group, Item};
+use crate::store::model::{Group, Item, ItemId};
 use crate::store::{self, WriteError};
 use chyron::TickerState;
 use std::path::{Path, PathBuf};
@@ -186,6 +186,8 @@ pub struct App {
     pub ticker: Option<TickerState>,
     /// Wrap long item text instead of truncating it.
     pub wrap: bool,
+    /// Items whose children are hidden.
+    pub collapsed: std::collections::HashSet<ItemId>,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
@@ -243,6 +245,7 @@ impl App {
             busy: None,
             ticker,
             wrap: config_wrap,
+            collapsed: std::collections::HashSet::new(),
             view_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
@@ -326,6 +329,7 @@ impl App {
             .items
             .iter()
             .filter(|item| group_file.is_none_or(|f| &item.file == f))
+            .filter(|item| !self.hidden_by_fold(item))
             .filter(|item| !(self.hide_done && item.done))
             .map(|item| (item, self.workspace.group_name_for(item)))
             .filter(|(item, group)| match &self.query {
@@ -338,6 +342,66 @@ impl App {
             query.sort_items(&mut items);
         }
         items.into_iter().map(|(item, _)| item).collect()
+    }
+
+    /// True if any ancestor of this item is collapsed.
+    ///
+    /// Walks up rather than down so a grandchild disappears when its
+    /// grandparent folds, however deep the nesting goes.
+    fn hidden_by_fold(&self, item: &Item) -> bool {
+        let mut parent = item.parent.clone();
+        while let Some(id) = parent {
+            if self.collapsed.contains(&id) {
+                return true;
+            }
+            parent = self
+                .workspace
+                .items
+                .iter()
+                .find(|i| i.id == id)
+                .and_then(|i| i.parent.clone());
+        }
+        false
+    }
+
+    /// Whether an item has children, and whether they are hidden.
+    pub fn fold_state(&self, item: &Item) -> Option<bool> {
+        (!item.children.is_empty()).then(|| self.collapsed.contains(&item.id))
+    }
+
+    /// Fold or unfold the selected item.
+    fn toggle_fold(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if item.children.is_empty() {
+            return;
+        }
+        let id = item.id.clone();
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
+        let len = self.visible_items().len();
+        self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+        self.follow_cursor();
+    }
+
+    /// Fold every item that has children, or unfold them all.
+    fn toggle_fold_all(&mut self) {
+        if self.collapsed.is_empty() {
+            self.collapsed = self
+                .workspace
+                .items
+                .iter()
+                .filter(|i| !i.children.is_empty())
+                .map(|i| i.id.clone())
+                .collect();
+        } else {
+            self.collapsed.clear();
+        }
+        let len = self.visible_items().len();
+        self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+        self.follow_cursor();
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -555,6 +619,16 @@ impl App {
         }
     }
 
+    /// True if this column is the selected item's fold marker.
+    fn fold_marker_column(&self, x: u16) -> bool {
+        let Some(item) = self.selected_item() else {
+            return false;
+        };
+        // Matches the prefix built in `layout_items`: cursor, indent, marker.
+        let marker = self.layout.items.x + 1 + 2 + item.indent as u16;
+        x == marker || x == marker + 1
+    }
+
     /// Which proposed change sits under this point, if any.
     fn review_row_at(&self, x: u16, y: u16) -> Option<usize> {
         let popup = view::review_rect(self.layout.whole);
@@ -723,6 +797,8 @@ impl App {
             (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
             (K::Char('s'), KeyModifiers::NONE) => self.spawn_git_sync(),
             (K::Char('c'), KeyModifiers::NONE) => self.toggle_ticker(),
+            (K::Char('z'), KeyModifiers::NONE) => self.toggle_fold(),
+            (K::Char('Z'), _) => self.toggle_fold_all(),
             (K::Char('p'), KeyModifiers::NONE) => {
                 if let Some(ticker) = &mut self.ticker {
                     ticker.toggle_pause();
@@ -943,7 +1019,16 @@ impl App {
             && let Some(index) = self.item_rows.get(row).copied()
         {
             self.focus = Focus::Items;
+            let was_selected = self.item_cursor == index;
             self.item_cursor = index;
+            // Clicking the fold marker of an already-selected node folds it,
+            // the way a file tree behaves.
+            if was_selected && self.fold_marker_column(x) {
+                self.toggle_fold();
+            }
+        } else if within(self.layout.detail, x, y) {
+            // The detail pane shows the notes; clicking it edits them.
+            self.begin_edit(EditKind::Description, true);
         }
     }
 
@@ -1374,6 +1459,7 @@ fn help_lines() -> Vec<String> {
         "items",
         "  space/x  toggle done  a/A  add sibling/child",
         "  e  edit text          i  edit description",
+        "  z  fold / unfold       Z  fold / unfold all",
         "  d  delete             h  hide done",
         "",
         "query",
@@ -2862,6 +2948,147 @@ mod tests {
         );
         let set = ChangeSet::parse(&json).unwrap();
         app.handle(Message::Event(Event::ChangeSetProposed(set)));
+    }
+
+    // --- the tree ---
+
+    const TREE: &str = "## P0 — Critical\n\n- [ ] parent one\n  - [ ] child a\n    - [ ] grandchild\n  - [ ] child b\n- [ ] parent two\n";
+
+    #[test]
+    fn nesting_is_parsed_to_any_depth() {
+        let (_d, app) = disk_app(TREE);
+        assert_eq!(app.visible_items().len(), 5);
+        let grandchild = &app.workspace.items[2];
+        assert_eq!(grandchild.text, "grandchild");
+        assert_eq!(grandchild.indent, 4);
+        assert!(grandchild.parent.is_some());
+    }
+
+    #[test]
+    fn folding_a_node_hides_its_whole_subtree() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('z'));
+
+        let texts: Vec<&str> = app
+            .visible_items()
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["parent one", "parent two"],
+            "the grandchild goes with its grandparent"
+        );
+
+        press(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.visible_items().len(), 5, "and comes back");
+    }
+
+    #[test]
+    fn folding_an_inner_node_hides_only_below_it() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('j')); // child a
+        press(&mut app, KeyCode::Char('z'));
+
+        let texts: Vec<&str> = app
+            .visible_items()
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["parent one", "child a", "child b", "parent two"]
+        );
+    }
+
+    #[test]
+    fn a_leaf_does_not_fold() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('G')); // parent two, a leaf
+        press(&mut app, KeyCode::Char('z'));
+        assert!(app.collapsed.is_empty(), "nothing to fold");
+    }
+
+    #[test]
+    fn shift_z_folds_and_unfolds_everything() {
+        let (_d, mut app) = disk_app(TREE);
+        app.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+        let texts: Vec<&str> = app
+            .visible_items()
+            .iter()
+            .map(|i| i.text.as_str())
+            .collect();
+        assert_eq!(texts, vec!["parent one", "parent two"], "roots only");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+        assert_eq!(app.visible_items().len(), 5);
+    }
+
+    #[test]
+    fn folding_keeps_the_cursor_in_range() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.item_cursor, 4);
+        app.handle_key(KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT));
+        assert!(
+            app.item_cursor < app.visible_items().len(),
+            "cursor does not dangle past the shorter list"
+        );
+    }
+
+    #[test]
+    fn a_fold_marker_shows_only_on_nodes_with_children() {
+        let (_d, app) = disk_app(TREE);
+        let parent = &app.workspace.items[0];
+        let leaf = &app.workspace.items[4];
+        assert_eq!(app.fold_state(parent), Some(false), "expanded");
+        assert_eq!(app.fold_state(leaf), None, "a leaf has no marker");
+    }
+
+    #[test]
+    fn clicking_the_detail_pane_edits_the_notes() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let detail = app.layout.detail;
+
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            detail.x + 4,
+            detail.y + 2,
+        ));
+        assert_eq!(app.mode, Mode::Editing(EditKind::Description));
+    }
+
+    #[test]
+    fn clicking_the_fold_marker_of_the_selected_node_folds_it() {
+        let (_d, mut app) = disk_app(TREE);
+        with_layout(&mut app);
+        let items = app.layout.items;
+
+        // Row 0 is already selected; its marker sits just past the cursor gutter.
+        let marker_x = items.x + 1 + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            marker_x,
+            items.y + 1,
+        ));
+        assert_eq!(app.visible_items().len(), 2, "subtree folded");
+    }
+
+    #[test]
+    fn clicking_a_different_row_selects_rather_than_folds() {
+        let (_d, mut app) = disk_app(TREE);
+        with_layout(&mut app);
+        let items = app.layout.items;
+
+        let marker_x = items.x + 1 + 2;
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            marker_x,
+            items.y + 2,
+        ));
+        assert_eq!(app.item_cursor, 1, "selects the row");
+        assert_eq!(app.visible_items().len(), 5, "and folds nothing");
     }
 
     #[test]
