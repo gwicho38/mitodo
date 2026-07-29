@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use chrono::Local;
 
 use super::wrap::{truncate, wrap_text};
-use super::{App, Focus, Mode, ViewSetting, chyron, viewport_start};
+use super::{App, Focus, Mode, ViewSetting, chyron};
 
 /// Short deadline marker, and whether it is already past.
 fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
@@ -40,7 +40,12 @@ pub struct Frames {
 
 /// `items_height` overrides the items/detail split, as set by dragging the
 /// divider between them.
-pub fn split_with(area: Rect, command_line_visible: bool, items_height: Option<u16>) -> Frames {
+pub fn split_with(
+    area: Rect,
+    command_line_visible: bool,
+    items_height: Option<u16>,
+    groups_width: Option<u16>,
+) -> Frames {
     let [top_bar, middle, command_line, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -53,7 +58,10 @@ pub fn split_with(area: Rect, command_line_visible: bool, items_height: Option<u
 
     let [groups, right] = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(22), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(groups_width.unwrap_or(22)),
+            Constraint::Min(0),
+        ])
         .areas(middle);
 
     let [items, detail] = Layout::default()
@@ -83,7 +91,12 @@ pub fn split_with(area: Rect, command_line_visible: bool, items_height: Option<u
 #[derive(Debug, Clone, Default)]
 pub struct Rendered {
     pub frames: Frames,
+    /// Which item each visible row of the item pane showed.
     pub item_rows: Vec<usize>,
+    /// Row each item starts at, counting from the top of the whole list.
+    pub item_starts: Vec<usize>,
+    /// Total rendered rows in the item list.
+    pub item_total_rows: usize,
 }
 
 pub fn render(app: &App, frame: &mut Frame) -> Rendered {
@@ -91,10 +104,10 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
         app.mode,
         Mode::EditingQuery | Mode::Editing(_) | Mode::AskingAgent(_)
     );
-    let f = split_with(frame.area(), editing, app.items_height);
+    let f = split_with(frame.area(), editing, app.items_height, app.groups_width);
     render_top_bar(app, frame, f.top_bar);
     render_groups(app, frame, f.groups);
-    let item_rows = render_items(app, frame, f.items);
+    let items = render_items(app, frame, f.items);
     render_detail(app, frame, f.detail);
     if editing {
         render_command_line(app, frame, f.command_line);
@@ -106,7 +119,9 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
     }
     Rendered {
         frames: f,
-        item_rows,
+        item_rows: items.visible_rows,
+        item_starts: items.starts,
+        item_total_rows: items.total_rows,
     }
 }
 
@@ -300,7 +315,7 @@ fn render_groups(app: &App, frame: &mut Frame, area: Rect) {
         (g.name.clone(), items.iter().filter(|i| !i.done).count())
     }));
 
-    let start = viewport_start(app.group_cursor, rows.len(), height);
+    let start = clamp_scroll(app.group_scroll, rows.len(), height);
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
@@ -384,16 +399,22 @@ fn layout_items(app: &App, width: usize) -> (Vec<ItemRow>, Vec<usize>) {
     (rows, starts)
 }
 
-fn render_items(app: &App, frame: &mut Frame, area: Rect) -> Vec<usize> {
+struct ItemRender {
+    visible_rows: Vec<usize>,
+    starts: Vec<usize>,
+    total_rows: usize,
+}
+
+fn render_items(app: &App, frame: &mut Frame, area: Rect) -> ItemRender {
     let theme = &app.theme;
     let focused = app.focus == Focus::Items;
     let height = area.height.saturating_sub(2) as usize;
     let width = area.width.saturating_sub(2) as usize;
 
     let (rows, starts) = layout_items(app, width);
-    // Scroll by rendered row so a wrapped item is not half-shown.
-    let cursor_row = starts.get(app.item_cursor).copied().unwrap_or(0);
-    let start = viewport_start(cursor_row, rows.len(), height);
+    // The scroll position is the app's, not derived from the cursor: the wheel
+    // moves the view without disturbing the selection.
+    let start = clamp_scroll(app.item_scroll, rows.len(), height);
 
     let mut lines = Vec::new();
     let mut row_items = Vec::new();
@@ -434,6 +455,7 @@ fn render_items(app: &App, frame: &mut Frame, area: Rect) -> Vec<usize> {
         lines.push(Line::from(spans));
         row_items.push(row.item_index);
     }
+    let total_rows = rows.len();
 
     let count = app.visible_items().len();
     let title = if count == 0 {
@@ -451,7 +473,19 @@ fn render_items(app: &App, frame: &mut Frame, area: Rect) -> Vec<usize> {
         ),
         area,
     );
-    row_items
+    ItemRender {
+        visible_rows: row_items,
+        starts,
+        total_rows,
+    }
+}
+
+/// Largest valid first-row index for a list of `len` rows in `height` rows.
+pub fn clamp_scroll(scroll: usize, len: usize, height: usize) -> usize {
+    if height == 0 || len <= height {
+        return 0;
+    }
+    scroll.min(len - height)
 }
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
@@ -634,6 +668,36 @@ mod tests {
         draw_app(&test_app(), width, height)
     }
 
+    /// Draw and feed the measurements back, as the real loop does.
+    fn draw_adopting(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut drawn = None;
+        terminal
+            .draw(|frame| drawn = Some(render(app, frame)))
+            .unwrap();
+        app.adopt(drawn.unwrap());
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Item texts visible in the item pane, ignoring the detail pane below it.
+    fn visible_item_texts(app: &App, rows: &[String]) -> Vec<String> {
+        let items = app.layout.items;
+        rows.iter()
+            .enumerate()
+            .filter(|(y, _)| {
+                *y as u16 > items.y && (*y as u16) < items.y + items.height.saturating_sub(1)
+            })
+            .map(|(_, row)| row.clone())
+            .collect()
+    }
+
     fn with_due(app: &mut App, index: usize, offset_days: i64) {
         app.workspace.items[index].due =
             Some(Local::now().date_naive() + chrono::Duration::days(offset_days));
@@ -757,16 +821,42 @@ mod tests {
     }
 
     #[test]
-    fn long_lists_scroll_to_keep_the_cursor_visible() {
+    fn the_view_renders_from_its_own_scroll_offset() {
         let mut app = test_app();
         app.workspace.items = (0..100)
             .map(|n| item(&format!("item-{n:03}"), false, 0))
             .collect();
-        app.item_cursor = 99;
 
-        let rows = draw_app(&app, 80, 24).join("\n");
-        assert!(rows.contains("item-099"), "cursor row is on screen");
-        assert!(!rows.contains("item-000"), "top of the list scrolled away");
+        let rows = draw_adopting(&mut app, 80, 24);
+        let top = visible_item_texts(&app, &rows).join("\n");
+        assert!(top.contains("item-000"), "starts at the top");
+
+        app.item_scroll = 40;
+        let rows = draw_adopting(&mut app, 80, 24);
+        let scrolled = visible_item_texts(&app, &rows).join("\n");
+        assert!(scrolled.contains("item-040"), "shows the scrolled-to row");
+        assert!(
+            !scrolled.contains("item-000"),
+            "top scrolled out of the list"
+        );
+    }
+
+    #[test]
+    fn a_cursor_move_scrolls_the_view_to_follow() {
+        let mut app = test_app();
+        app.workspace.items = (0..100)
+            .map(|n| item(&format!("item-{n:03}"), false, 0))
+            .collect();
+
+        // One draw to measure the list, then move the cursor and follow it.
+        draw_adopting(&mut app, 80, 24);
+        app.item_cursor = 99;
+        app.follow_cursor();
+
+        let rows = draw_adopting(&mut app, 80, 24);
+        let shown = visible_item_texts(&app, &rows).join("\n");
+        assert!(shown.contains("item-099"), "cursor row is on screen");
+        assert!(!shown.contains("item-000"), "top of the list scrolled away");
     }
 
     #[test]

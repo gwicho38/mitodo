@@ -140,9 +140,13 @@ entirely.
 | | | `q` | quit |
 
 Mouse works too: click to select a row, wheel to scroll the pane under the
-pointer, and drag the divider between the item list and the detail pane to
-resize them. Set `ui.mouse = false` to hand selection and scrollback back to
-your terminal.
+pointer, and drag any divider to resize the panes — the one below the groups
+list, and the one between the item list and the detail pane. Set
+`ui.mouse = false` to hand selection and scrollback back to your terminal.
+
+The wheel scrolls the *view* and leaves your selection where it is, the way
+scrolling works everywhere else. `j`/`k` move the selection, and the view
+follows along to keep it on screen.
 
 ## View settings
 
