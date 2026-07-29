@@ -143,9 +143,44 @@ pub fn review_rect(area: Rect) -> Rect {
 
 /// How many change rows the review list can show at once.
 ///
-/// The modal spends rows on its border, the summary, and the reason footer.
+/// The modal spends rows on its border, the summary, the reason footer and the
+/// button row.
 pub fn review_visible_rows(area: Rect) -> usize {
-    review_rect(area).height.saturating_sub(6) as usize
+    review_rect(area).height.saturating_sub(8) as usize
+}
+
+pub fn apply_label(selected: usize) -> String {
+    format!("  Apply {selected}  ")
+}
+
+pub const CANCEL_LABEL: &str = "  Cancel  ";
+
+/// The button row sits on the last content row inside the border.
+fn button_row(area: Rect) -> u16 {
+    let popup = review_rect(area);
+    popup.y + popup.height.saturating_sub(2)
+}
+
+/// Where the Apply button is drawn, so it can be clicked.
+pub fn apply_button_rect(area: Rect, selected: usize) -> Rect {
+    let popup = review_rect(area);
+    Rect {
+        x: popup.x + 2,
+        y: button_row(area),
+        width: apply_label(selected).chars().count() as u16,
+        height: 1,
+    }
+}
+
+/// Where the Cancel button is drawn.
+pub fn cancel_button_rect(area: Rect, selected: usize) -> Rect {
+    let apply = apply_button_rect(area, selected);
+    Rect {
+        x: apply.x + apply.width + 2,
+        y: apply.y,
+        width: CANCEL_LABEL.chars().count() as u16,
+        height: 1,
+    }
 }
 
 /// First content row of the review list, for hit-testing clicks.
@@ -228,9 +263,44 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme.eff_border(true))
-                .title("review — space picks · a all · enter applies · esc discards"),
+                .title("review — space picks one · a toggles all"),
         ),
         popup,
+    );
+
+    // Buttons last, so they sit on top of the list.
+    let apply = apply_button_rect(area, chosen);
+    let cancel = cancel_button_rect(area, chosen);
+    let enabled = chosen > 0;
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            apply_label(chosen),
+            if enabled {
+                theme.selected(&theme.header())
+            } else {
+                theme.inactive()
+            },
+        ))),
+        apply,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(CANCEL_LABEL, theme.statusbar()))),
+        cancel,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  enter applies · esc cancels".to_string(),
+            theme.paragraph(),
+        ))),
+        Rect {
+            x: cancel.x + cancel.width + 2,
+            y: cancel.y,
+            width: popup
+                .width
+                .saturating_sub(cancel.x + cancel.width + 2 - popup.x)
+                .saturating_sub(1),
+            height: 1,
+        },
     );
 }
 

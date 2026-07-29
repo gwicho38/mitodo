@@ -539,7 +539,15 @@ impl App {
                 self.review_scroll = scroll_by(self.review_scroll, -SCROLL_STEP, total, height);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(index) = self.review_row_at(x, y) {
+                let chosen = self.review_selected.iter().filter(|s| **s).count();
+                let whole = self.layout.whole;
+                if within(view::apply_button_rect(whole, chosen), x, y) {
+                    self.apply_review();
+                } else if within(view::cancel_button_rect(whole, chosen), x, y) {
+                    self.mode = Mode::Normal;
+                    self.pending = None;
+                    self.notice = Some("change-set discarded".to_string());
+                } else if let Some(index) = self.review_row_at(x, y) {
                     self.toggle_review_at(index);
                 }
             }
@@ -2946,6 +2954,67 @@ mod tests {
             "clicked the second"
         );
         assert_eq!(app.review_cursor, 1, "and highlighted it");
+    }
+
+    #[test]
+    fn clicking_apply_applies_the_selection() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        with_layout(&mut app);
+        press(&mut app, KeyCode::Char(' ')); // unpick the first
+        with_layout(&mut app);
+
+        let button = view::apply_button_rect(app.layout.whole, 2);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 2,
+            button.y,
+        ));
+
+        assert_eq!(app.mode, Mode::Modal, "the report is shown");
+        let text = read(&app);
+        assert!(!text.contains("proposal 0"), "the unpicked one stayed out");
+        assert!(text.contains("proposal 1") && text.contains("proposal 2"));
+    }
+
+    #[test]
+    fn clicking_cancel_discards_without_writing() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        with_layout(&mut app);
+
+        let button = view::cancel_button_rect(app.layout.whole, 3);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            button.x + 2,
+            button.y,
+        ));
+
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC, "file untouched");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("discarded")
+        );
+    }
+
+    #[test]
+    fn the_buttons_do_not_overlap_the_change_rows() {
+        let (_d, mut app) = disk_app(DOC);
+        proposed(&mut app, 3);
+        with_layout(&mut app);
+
+        let whole = app.layout.whole;
+        let apply = view::apply_button_rect(whole, 3);
+        let first = view::review_first_row(whole);
+        let last_row = first + view::review_visible_rows(whole) as u16;
+        assert!(apply.y >= last_row, "buttons sit below the list");
+        assert!(
+            app.review_row_at(apply.x + 1, apply.y).is_none(),
+            "a click on Apply is not also a row toggle"
+        );
     }
 
     #[test]

@@ -267,7 +267,7 @@ whatever you typed.
 Anything that writes shows you the proposals first, as a list you pick from:
 
 ```
-┌review — space picks · a all · enter applies · esc discards ──────────────┐
+┌review — space picks one · a toggles all ─────────────────────────────────┐
 │found 4 actionable items across your inboxes — 3 of 4 selected            │
 │▸ [x] + add w/TODO.md · Reply to opposing counsel about the discovery…    │
 │  [ ] + add w/TODO.md · File the 83(b) election                           │
@@ -276,13 +276,16 @@ Anything that writes shows you the proposals first, as a list you pick from:
 │+ add w/TODO.md · Reply to opposing counsel about the discovery deadline  │
 │extension request they sent Tuesday                                       │
 │why: email from David Ashcraft, 2 days old, asks for a response this week │
+│                                                                          │
+│  Apply 3      Cancel      enter applies · esc cancels                    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 Everything starts picked. `j`/`k` moves, `space` picks one, `a` toggles all,
-`enter` applies what is selected and `esc` throws the lot away — and clicking a
-row works too. The highlighted change is shown in full below the list, wrapped,
-with the agent's reason for proposing it.
+and clicking a row toggles it. **Apply** and **Cancel** are buttons you can
+click — Apply counts what is selected, so you can see what you are about to
+commit to — and `enter` and `esc` do the same. The highlighted change is shown
+in full below the list, wrapped, with the agent's reason for proposing it.
 
 Applying goes through the same conflict-aware writer, so a stale proposal is
 refused rather than forced.
