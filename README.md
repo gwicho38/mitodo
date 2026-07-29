@@ -125,55 +125,35 @@ entirely.
 
 ## Keys
 
+Arrows work the list and the tree; `hjkl` moves between panes.
+
 | | | | |
 |---|---|---|---|
-| `j` `k` | down / up | `space` `x` | toggle done |
-| `g` `G` | first / last | `a` `A` | add sibling / child |
-| `tab` | focus items | `e` | edit text |
-| `shift-tab` | focus groups | `i` | edit description |
-| `/` | edit query | `d` | delete (asks first) |
-| `esc` | clear query | `h` | hide done |
-| `s` | git sync | `c` | scrolling ticker |
-| `N` | read group notes | `X` | archive finished items |
-| `p` | pause the ticker | `+` `-` | ticker speed |
-| `z` `Z` | fold / fold all | `v` | view settings |
-| | | `?` | help |
-| | | `q` | quit |
+| `↑` `↓` | move / scroll | `space` `x` | toggle done |
+| `→` | open a node, then step into it | `a` `A` | add sibling / child |
+| `←` | close a node, then step out to its parent | `e` | edit text |
+| `g` `G` | first / last | `i` | edit description |
+| `h` `j` `k` `l` | move between panes | `d` | delete (asks first) |
+| `z` `Z` | fold / fold all | `H` | hide done |
+| `/` `esc` | edit / clear query | `s` | git sync |
+| `v` | view settings | `c` | scrolling ticker |
+| `N` | read group notes | `X` | archive finished |
+| `?` | help | `q` | quit |
+
+The panes sit groups-left, items above detail on the right, and `hjkl` follows
+that layout: `h` from either right-hand pane goes to the groups list, `l` goes
+back, and `j`/`k` move between the item list and the detail pane. Focus the
+detail pane and the arrows scroll it.
 
 Mouse works too: click to select a row, wheel to scroll the pane under the
-pointer, and drag any divider to resize the panes — the one below the groups
-list, and the one between the item list and the detail pane. Set
-`ui.mouse = false` to hand selection and scrollback back to your terminal.
+pointer, and drag any divider to resize the panes — the one beside the groups
+list, and the one between the item list and the detail pane. Clicking the
+`▾`/`▸` marker of the selected node folds it, and clicking the detail pane
+edits that item's notes. Set `ui.mouse = false` to hand selection and
+scrollback back to your terminal.
 
 The wheel scrolls the *view* and leaves your selection where it is, the way
-scrolling works everywhere else. `j`/`k` move the selection, and the view
-follows along to keep it on screen.
-
-## View settings
-
-`v` — or clicking **view ▾** in the top bar — opens a small menu of display
-toggles. `j`/`k` moves, `space` toggles, `esc` closes, and clicking an entry
-works too.
-
-| setting | what it does |
-|---|---|
-| wrap long text | show the whole item across several rows instead of cutting it at the pane edge |
-| hide finished items | same as `h` |
-| scrolling ticker | same as `c` |
-
-All three are remembered between runs.
-
-```
-  mitodo   all · 100 open / 278 shown                            view ▾
-┌groups──────────────┐┌items 1/278──────────────────────────────────────┐
-│▸ all        100    ││▸ [x] P0  ~~Phase A — Demand for Engagement~~ —  │
-│  everlongtech 38   ││          Mooted; proceeded directly to Notice   │
-│  holon       13    ││          of Termination per Luis's Mar 4 note.  │
-```
-
-Wrapping keeps the cursor and the mouse honest: scrolling moves by rendered
-row so a wrapped item is never half-shown, and clicking any row of a wrapped
-item selects that item.
+scrolling works everywhere else.
 
 ## Queries
 
@@ -231,11 +211,11 @@ Nesting goes as deep as you like, and the list behaves like a file tree:
     [ ] P0  parent two
 ```
 
-`z` folds or unfolds the selected node, `Z` does the lot, and clicking the
-`▾`/`▸` marker of the selected node works too. Folding a node hides its whole
-subtree, however deep. `A` adds a child to the selected item.
-
-Clicking the detail pane edits that item's notes, the same as pressing `i`.
+`→` opens a node and `←` closes it, exactly as a file tree behaves: pressing
+`→` again on an open node steps into its first child, and `←` on a leaf steps
+out to its parent. `z` toggles the selected node, `Z` does every node at once.
+Folding hides the whole subtree, however deep. `A` adds a child to the
+selected item.
 
 ## Editing safely alongside other tools
 

@@ -688,6 +688,7 @@ pub fn clamp_scroll(scroll: usize, len: usize, height: usize) -> usize {
 
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
+    let focused = app.focus == Focus::Detail;
     let lines: Vec<Line> = match app.selected_item() {
         Some(item) => {
             let mut lines = vec![
@@ -738,9 +739,11 @@ fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(theme.eff_border(false))
+        .border_style(theme.eff_border(focused))
         .title("detail");
-    let paragraph = Paragraph::new(lines).block(block);
+    let paragraph = Paragraph::new(lines)
+        .scroll((app.detail_scroll as u16, 0))
+        .block(block);
     frame.render_widget(
         if app.wrap {
             paragraph.wrap(ratatui::widgets::Wrap { trim: false })
@@ -820,7 +823,7 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             theme.statusbar(),
         )),
         (None, None, Mode::Normal) => Line::from(Span::styled(
-            " space toggle · a add · e edit · d del · / query · s sync · ? keys · q quit "
+            " ↑↓ move · ←→ tree · hjkl panes · space toggle · a add · e edit · / query · ? keys "
                 .to_string(),
             theme.statusbar(),
         )),
@@ -1061,16 +1064,17 @@ mod tests {
         let app = test_app();
         assert!(app.busy.is_none());
         let rows = draw_app(&app, 90, 24);
-        assert!(rows.last().unwrap().contains("q quit"));
+        assert!(rows.last().unwrap().contains("space toggle"));
     }
 
     #[test]
     fn status_bar_lists_the_keybindings() {
         let rows = draw(80, 24);
         let last = rows.last().unwrap();
-        assert!(last.contains("q quit"));
         assert!(last.contains("space toggle"));
         assert!(last.contains("/ query"));
+        assert!(last.contains("hjkl panes"), "the pane keys are advertised");
+        assert!(last.contains("←→ tree"), "and the tree keys");
     }
 
     #[test]

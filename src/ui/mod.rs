@@ -80,6 +80,22 @@ pub enum Divider {
 pub enum Focus {
     Groups,
     Items,
+    Detail,
+}
+
+impl Focus {
+    /// Where `hjkl` lands from here, following the pane layout: groups on the
+    /// left, items above detail on the right.
+    fn step(self, direction: char) -> Focus {
+        match (self, direction) {
+            (Focus::Items | Focus::Detail, 'h') => Focus::Groups,
+            (Focus::Groups, 'l') => Focus::Items,
+            (Focus::Items, 'j') => Focus::Detail,
+            (Focus::Detail, 'k') => Focus::Items,
+            (Focus::Groups, 'j' | 'k') => Focus::Groups,
+            (current, _) => current,
+        }
+    }
 }
 
 /// What keyboard input currently means.
@@ -188,6 +204,8 @@ pub struct App {
     pub wrap: bool,
     /// Items whose children are hidden.
     pub collapsed: std::collections::HashSet<ItemId>,
+    /// First visible line of the detail pane.
+    pub detail_scroll: usize,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
@@ -246,6 +264,7 @@ impl App {
             ticker,
             wrap: config_wrap,
             collapsed: std::collections::HashSet::new(),
+            detail_scroll: 0,
             view_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
@@ -367,6 +386,50 @@ impl App {
     /// Whether an item has children, and whether they are hidden.
     pub fn fold_state(&self, item: &Item) -> Option<bool> {
         (!item.children.is_empty()).then(|| self.collapsed.contains(&item.id))
+    }
+
+    /// Right arrow: open a folded node, or step into its first child.
+    fn expand(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        if item.children.is_empty() {
+            return;
+        }
+        let id = item.id.clone();
+        if self.collapsed.remove(&id) {
+            self.follow_cursor();
+            return;
+        }
+        // Already open, so move onto the first child.
+        self.move_cursor(1);
+    }
+
+    /// Left arrow: close a node, or step out to its parent.
+    fn collapse(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let (id, parent, has_children) = (
+            item.id.clone(),
+            item.parent.clone(),
+            !item.children.is_empty(),
+        );
+
+        if has_children && !self.collapsed.contains(&id) {
+            self.collapsed.insert(id);
+            let len = self.visible_items().len();
+            self.item_cursor = self.item_cursor.min(len.saturating_sub(1));
+            self.follow_cursor();
+            return;
+        }
+        // A leaf, or already closed: step out to the parent.
+        if let Some(parent) = parent
+            && let Some(index) = self.visible_items().iter().position(|i| i.id == parent)
+        {
+            self.item_cursor = index;
+            self.follow_cursor();
+        }
     }
 
     /// Fold or unfold the selected item.
@@ -778,17 +841,24 @@ impl App {
             (K::Char('q'), KeyModifiers::NONE) => self.should_quit = true,
             (K::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
 
-            (K::Char('j'), KeyModifiers::NONE) | (K::Down, _) => self.move_cursor(1),
-            (K::Char('k'), KeyModifiers::NONE) | (K::Up, _) => self.move_cursor(-1),
+            // Arrows drive the list and the tree.
+            (K::Down, _) => self.move_cursor(1),
+            (K::Up, _) => self.move_cursor(-1),
+            (K::Right, _) => self.expand(),
+            (K::Left, _) => self.collapse(),
+
             (K::Char('g'), KeyModifiers::NONE) => self.cursor_to_start(),
             (K::Char('G'), _) => self.cursor_to_end(),
 
-            (K::Tab, _) | (K::Char('l'), KeyModifiers::NONE) | (K::Right, _) => {
-                self.focus = Focus::Items
-            }
-            (K::BackTab, _) | (K::Left, _) => self.focus = Focus::Groups,
+            // hjkl moves between panes.
+            (K::Char('h'), KeyModifiers::NONE) => self.focus = self.focus.step('h'),
+            (K::Char('l'), KeyModifiers::NONE) => self.focus = self.focus.step('l'),
+            (K::Char('j'), KeyModifiers::NONE) => self.focus = self.focus.step('j'),
+            (K::Char('k'), KeyModifiers::NONE) => self.focus = self.focus.step('k'),
+            (K::Tab, _) => self.focus = Focus::Items,
+            (K::BackTab, _) => self.focus = Focus::Groups,
 
-            (K::Char('h'), KeyModifiers::NONE) => self.toggle_hide_done(),
+            (K::Char('H'), _) => self.toggle_hide_done(),
 
             (K::Char(' '), _) | (K::Char('x'), KeyModifiers::NONE) => self.toggle_selected(),
             (K::Char('a'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
@@ -1034,9 +1104,14 @@ impl App {
 
     /// Move the focused pane's cursor, saturating at both ends.
     fn move_cursor(&mut self, delta: isize) {
+        if self.focus == Focus::Detail {
+            // The detail pane scrolls rather than carrying a cursor.
+            self.detail_scroll = self.detail_scroll.saturating_add_signed(delta);
+            return;
+        }
         let (cursor, len) = match self.focus {
             Focus::Groups => (&mut self.group_cursor, self.workspace.groups.len() + 1),
-            Focus::Items => {
+            _ => {
                 let len = self.visible_items().len();
                 (&mut self.item_cursor, len)
             }
@@ -1069,6 +1144,7 @@ impl App {
                 self.item_cursor = 0;
             }
             Focus::Items => self.item_cursor = 0,
+            Focus::Detail => self.detail_scroll = 0,
         }
         self.follow_cursor();
     }
@@ -1082,6 +1158,7 @@ impl App {
             Focus::Items => {
                 self.item_cursor = self.visible_items().len().saturating_sub(1);
             }
+            Focus::Detail => {}
         }
         self.follow_cursor();
     }
@@ -1453,14 +1530,15 @@ fn fail(verb: Verb, body: String) -> Event {
 fn help_lines() -> Vec<String> {
     [
         "navigation",
-        "  j/k  down/up          g/G  first/last",
-        "  tab  focus items      shift-tab  focus groups",
+        "  ↑/↓  move             g/G  first/last",
+        "  →/←  expand / collapse a node",
+        "  h/j/k/l  move between panes · tab items · shift-tab groups",
         "",
         "items",
         "  space/x  toggle done  a/A  add sibling/child",
         "  e  edit text          i  edit description",
         "  z  fold / unfold       Z  fold / unfold all",
-        "  d  delete             h  hide done",
+        "  d  delete             H  hide done",
         "",
         "query",
         "  /  edit query         esc  clear query",
@@ -1623,7 +1701,7 @@ mod tests {
     fn selecting_a_group_filters_the_item_list() {
         let mut app = app();
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.selected_group().unwrap().name, "a");
         assert_eq!(app.visible_items().len(), 2);
     }
@@ -1631,10 +1709,10 @@ mod tests {
     #[test]
     fn hide_done_removes_completed_items() {
         let mut app = app();
-        press(&mut app, KeyCode::Char('h'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
         assert!(app.hide_done);
         assert_eq!(app.visible_items().len(), 2);
-        press(&mut app, KeyCode::Char('h'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
         assert_eq!(app.visible_items().len(), 3);
     }
 
@@ -1642,11 +1720,11 @@ mod tests {
     fn cursor_saturates_at_both_ends() {
         let mut app = app();
         for _ in 0..10 {
-            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Down);
         }
         assert_eq!(app.item_cursor, 2, "stops at the last item");
         for _ in 0..10 {
-            press(&mut app, KeyCode::Char('k'));
+            press(&mut app, KeyCode::Up);
         }
         assert_eq!(app.item_cursor, 0, "stops at the first item");
     }
@@ -1663,12 +1741,12 @@ mod tests {
     #[test]
     fn changing_group_resets_the_item_cursor() {
         let mut app = app();
-        press(&mut app, KeyCode::Char('j'));
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.item_cursor, 2);
 
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.item_cursor, 0, "cursor must not dangle past the filter");
     }
 
@@ -1677,7 +1755,7 @@ mod tests {
         let mut app = app();
         app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
         assert_eq!(app.item_cursor, 2);
-        press(&mut app, KeyCode::Char('h'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
         assert!(
             app.item_cursor < app.visible_items().len(),
             "cursor stays inside the shorter list"
@@ -1696,7 +1774,7 @@ mod tests {
     #[test]
     fn selected_item_tracks_the_cursor() {
         let mut app = app();
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.selected_item().unwrap().text, "a-done");
     }
 
@@ -1824,7 +1902,7 @@ mod tests {
         let mut app = app();
         type_query(&mut app, "!done");
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j')); // group "a"
+        press(&mut app, KeyCode::Down); // group "a"
         assert_eq!(app.visible_items().len(), 1, "open items in group a only");
         assert_eq!(app.visible_items()[0].text, "a-open");
     }
@@ -2013,7 +2091,7 @@ mod tests {
         app.config.save(&config_path).unwrap();
         app = app.with_config_path(&config_path);
 
-        press(&mut app, KeyCode::Char('h')); // hide done
+        app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT)); // hide done
         press(&mut app, KeyCode::Char('c')); // ticker on
         app.persist_ui_state();
 
@@ -2047,7 +2125,7 @@ mod tests {
         app.reload();
 
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j')); // select "lefv"
+        press(&mut app, KeyCode::Down); // select "lefv"
         app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
         assert_eq!(app.mode, Mode::ConfirmingArchive);
         assert_eq!(read(&app), DOC, "nothing moved before confirmation");
@@ -2070,7 +2148,7 @@ mod tests {
         app.reload();
 
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         app.handle_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
         press(&mut app, KeyCode::Char('n'));
         assert_eq!(app.mode, Mode::Normal);
@@ -2102,7 +2180,7 @@ mod tests {
         app.reload();
 
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j')); // select "lefv"
+        press(&mut app, KeyCode::Down); // select "lefv"
         app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
 
         let (title, body) = app.modal.clone().expect("notes modal opened");
@@ -2114,7 +2192,7 @@ mod tests {
     fn shift_n_explains_when_a_group_has_no_notes() {
         let (_d, mut app) = disk_app(DOC);
         app.focus = Focus::Groups;
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         app.handle_key(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT));
         assert!(app.modal.is_none());
         assert!(
@@ -2149,7 +2227,7 @@ mod tests {
         let (_d, mut app) = disk_app(DOC);
         app.notice = Some("workspace changed on disk, reloaded".to_string());
 
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         assert!(app.notice.is_none(), "the next thing you do clears it");
     }
 
@@ -2443,7 +2521,7 @@ mod tests {
 
         // Walk the cursor past the bottom of the viewport.
         for _ in 0..(height + 2) {
-            press(&mut app, KeyCode::Char('j'));
+            press(&mut app, KeyCode::Down);
         }
         assert!(app.item_scroll > 0, "the view followed the cursor down");
         assert!(
@@ -2466,7 +2544,7 @@ mod tests {
         assert!(app.item_scroll > 0);
         assert_eq!(app.item_cursor, 0, "selection untouched by scrolling");
 
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.item_scroll, 1, "the cursor's row is shown again");
     }
 
@@ -2955,6 +3033,115 @@ mod tests {
     const TREE: &str = "## P0 — Critical\n\n- [ ] parent one\n  - [ ] child a\n    - [ ] grandchild\n  - [ ] child b\n- [ ] parent two\n";
 
     #[test]
+    fn hjkl_moves_between_panes() {
+        let (_d, mut app) = disk_app(TREE);
+        assert_eq!(app.focus, Focus::Items);
+
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focus, Focus::Groups, "h goes left");
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.focus, Focus::Items, "l goes right");
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.focus, Focus::Detail, "j goes down to the detail pane");
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.focus, Focus::Items, "k goes back up");
+    }
+
+    #[test]
+    fn pane_moves_stop_at_the_edges() {
+        let (_d, mut app) = disk_app(TREE);
+        app.focus = Focus::Groups;
+        press(&mut app, KeyCode::Char('h'));
+        assert_eq!(app.focus, Focus::Groups, "nothing left of groups");
+
+        app.focus = Focus::Detail;
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.focus, Focus::Detail, "nothing below detail");
+    }
+
+    #[test]
+    fn hjkl_does_not_move_the_selection() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.item_cursor, 1);
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.item_cursor, 1, "panes moved, the cursor did not");
+    }
+
+    #[test]
+    fn the_arrows_move_the_selection() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.item_cursor, 2);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.item_cursor, 1);
+    }
+
+    #[test]
+    fn right_opens_a_folded_node_then_steps_into_it() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('z')); // fold "parent one"
+        assert_eq!(app.visible_items().len(), 2);
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.visible_items().len(), 5, "opened");
+        assert_eq!(app.item_cursor, 0, "still on the node");
+
+        press(&mut app, KeyCode::Right);
+        assert_eq!(
+            app.item_cursor, 1,
+            "already open, so step to the first child"
+        );
+    }
+
+    #[test]
+    fn left_closes_a_node_then_steps_out_to_the_parent() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.visible_items().len(), 2, "closed the selected node");
+
+        press(&mut app, KeyCode::Right); // reopen
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down); // grandchild
+        assert_eq!(app.selected_item().unwrap().text, "grandchild");
+
+        press(&mut app, KeyCode::Left);
+        assert_eq!(
+            app.selected_item().unwrap().text,
+            "child a",
+            "a leaf steps out to its parent"
+        );
+    }
+
+    #[test]
+    fn right_on_a_leaf_does_nothing() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('G')); // parent two, a leaf
+        let before = app.item_cursor;
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.item_cursor, before);
+        assert_eq!(app.visible_items().len(), 5);
+    }
+
+    #[test]
+    fn the_detail_pane_scrolls_when_focused() {
+        let (_d, mut app) = disk_app(TREE);
+        press(&mut app, KeyCode::Char('j')); // focus detail
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.detail_scroll, 1);
+        assert_eq!(app.item_cursor, 0, "the item list did not move");
+    }
+
+    #[test]
+    fn shift_h_still_hides_finished_items() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
+        assert!(app.hide_done);
+    }
+
+    #[test]
     fn nesting_is_parsed_to_any_depth() {
         let (_d, app) = disk_app(TREE);
         assert_eq!(app.visible_items().len(), 5);
@@ -2987,7 +3174,7 @@ mod tests {
     #[test]
     fn folding_an_inner_node_hides_only_below_it() {
         let (_d, mut app) = disk_app(TREE);
-        press(&mut app, KeyCode::Char('j')); // child a
+        press(&mut app, KeyCode::Down); // child a
         press(&mut app, KeyCode::Char('z'));
 
         let texts: Vec<&str> = app
@@ -3103,7 +3290,7 @@ mod tests {
     fn space_unpicks_a_single_change() {
         let (_d, mut app) = disk_app(DOC);
         proposed(&mut app, 3);
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char(' '));
         assert_eq!(app.review_selected, vec![true, false, true]);
     }
@@ -3122,7 +3309,7 @@ mod tests {
     fn only_the_picked_changes_are_applied() {
         let (_d, mut app) = disk_app(DOC);
         proposed(&mut app, 3);
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char(' ')); // unpick the second
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -3390,7 +3577,7 @@ mod tests {
     #[test]
     fn an_empty_workspace_does_not_panic_on_navigation() {
         let mut app = App::new(Workspace::default(), Config::default());
-        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Char('G'));
         assert_eq!(app.item_cursor, 0);
         assert!(app.selected_item().is_none());
