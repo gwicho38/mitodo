@@ -26,6 +26,46 @@ use edit::Editor;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// Something an agent proposed, waiting to be picked over.
+///
+/// Two shapes reach the same review list: a scan's change-set, and the
+/// sub-items a breakdown suggests for one item.
+#[derive(Debug, Clone)]
+pub enum Pending {
+    Changes(ChangeSet),
+    SubItems { parent: ItemId, lines: Vec<String> },
+}
+
+impl Pending {
+    pub fn len(&self) -> usize {
+        match self {
+            Pending::Changes(set) => set.changes.len(),
+            Pending::SubItems { lines, .. } => lines.len(),
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        match self {
+            Pending::Changes(set) => set.summary.clone(),
+            Pending::SubItems { .. } => "proposed sub-items".to_string(),
+        }
+    }
+
+    pub fn row(&self, index: usize) -> String {
+        match self {
+            Pending::Changes(set) => set.row(index),
+            Pending::SubItems { lines, .. } => lines.get(index).cloned().unwrap_or_default(),
+        }
+    }
+
+    pub fn reason(&self, index: usize) -> String {
+        match self {
+            Pending::Changes(set) => set.reason(index),
+            Pending::SubItems { .. } => String::new(),
+        }
+    }
+}
+
 /// A background task the user is waiting on.
 ///
 /// Carries enough to prove it is still alive: a frame that advances on every
@@ -283,8 +323,12 @@ pub struct App {
     pub notice: Option<String>,
     /// Title and body of the modal, when one is open.
     pub modal: Option<(String, Vec<String>)>,
-    /// Change-set awaiting review.
-    pub pending: Option<ChangeSet>,
+    /// First visible line of the modal, for bodies too long to fit.
+    pub modal_scroll: usize,
+    /// Wrapped rows the modal body last came to.
+    modal_rows: usize,
+    /// Proposals awaiting review.
+    pub pending: Option<Pending>,
     /// Which proposed changes are picked, and where the cursor is in the list.
     pub review_selected: Vec<bool>,
     pub review_cursor: usize,
@@ -353,6 +397,8 @@ impl App {
             edit_buffer: String::new(),
             notice: None,
             modal: None,
+            modal_scroll: 0,
+            modal_rows: 0,
             pending: None,
             review_selected: Vec::new(),
             review_cursor: 0,
@@ -602,6 +648,7 @@ impl App {
     /// Take the measurements of the frame just drawn.
     fn adopt(&mut self, rendered: view::Rendered) {
         self.layout = rendered.frames;
+        self.modal_rows = rendered.modal_rows;
         self.item_rows = rendered.item_rows;
         self.item_starts = rendered.item_starts;
         self.item_total_rows = rendered.item_total_rows;
@@ -634,13 +681,14 @@ impl App {
             }
             Message::Event(Event::ChangeSetProposed(set)) => {
                 self.busy = None;
-                // Everything starts picked: the common case is accepting the
-                // lot, and unpicking is easier than picking from nothing.
-                self.review_selected = vec![true; set.changes.len()];
-                self.review_cursor = 0;
-                self.review_scroll = 0;
-                self.pending = Some(set);
-                self.mode = Mode::ReviewingChangeSet;
+                self.begin_review(Pending::Changes(set));
+            }
+            Message::Event(Event::SubItemsProposed(lines)) => {
+                self.busy = None;
+                match self.selected_item().map(|i| i.id.clone()) {
+                    Some(parent) => self.begin_review(Pending::SubItems { parent, lines }),
+                    None => self.notice = Some("no item to add sub-items to".to_string()),
+                }
             }
             Message::Event(Event::WorkspaceReloaded) => {
                 // Don't stomp on a half-typed edit; the reload lands when the
@@ -674,10 +722,7 @@ impl App {
                     self.archive_done();
                 }
             }
-            Mode::Modal => {
-                self.mode = Mode::Normal;
-                self.modal = None;
-            }
+            Mode::Modal => self.handle_modal_key(key),
             Mode::ReviewingChangeSet => self.handle_review_key(key),
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
@@ -919,12 +964,23 @@ impl App {
         }
     }
 
+    /// Open the review list over whatever was proposed.
+    fn begin_review(&mut self, pending: Pending) {
+        // Everything starts picked: the common case is accepting the lot, and
+        // unpicking is easier than picking from nothing.
+        self.review_selected = vec![true; pending.len()];
+        self.review_cursor = 0;
+        self.review_scroll = 0;
+        self.pending = Some(pending);
+        self.mode = Mode::ReviewingChangeSet;
+    }
+
     fn handle_review_key(&mut self, key: KeyEvent) {
         use KeyCode as K;
         let last = self
             .pending
             .as_ref()
-            .map_or(0, |s| s.changes.len())
+            .map_or(0, |p| p.len())
             .saturating_sub(1);
         match key.code {
             K::Esc | K::Char('q') | K::Char('n') => {
@@ -961,7 +1017,7 @@ impl App {
 
     /// Clicks and scrolling inside the review list.
     fn handle_review_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16) {
-        let total = self.pending.as_ref().map_or(0, |s| s.changes.len());
+        let total = self.pending.as_ref().map_or(0, |p| p.len());
         let height = view::review_visible_rows(self.layout.whole);
         match kind {
             MouseEventKind::ScrollDown => {
@@ -1008,7 +1064,7 @@ impl App {
         if y < first || y >= first + height as u16 {
             return None;
         }
-        let total = self.pending.as_ref().map_or(0, |s| s.changes.len());
+        let total = self.pending.as_ref().map_or(0, |p| p.len());
         let index = self.review_scroll + (y - first) as usize;
         (index < total).then_some(index)
     }
@@ -1033,26 +1089,55 @@ impl App {
     }
 
     /// Apply the picked changes and report what happened.
+    /// Apply the picked proposals and report what happened.
     fn apply_review(&mut self) {
         self.mode = Mode::Normal;
-        let Some(set) = self.pending.take() else {
+        let Some(pending) = self.pending.take() else {
             return;
         };
-        let picked = set.selected(&self.review_selected);
-        if picked.changes.is_empty() {
+        let offered = pending.len();
+        if !self.review_selected.iter().any(|s| *s) {
             self.notice = Some("nothing selected; no changes applied".to_string());
             return;
         }
 
-        let report = agent::changeset::apply(&self.workspace.root, &self.workspace.items, &picked);
+        let (applied, skipped) = match pending {
+            Pending::Changes(set) => {
+                let picked = set.selected(&self.review_selected);
+                let report =
+                    agent::changeset::apply(&self.workspace.root, &self.workspace.items, &picked);
+                (report.applied, report.skipped)
+            }
+            Pending::SubItems { parent, lines } => self.apply_sub_items(&parent, &lines),
+        };
+
         self.reload();
-        let mut body = vec![format!(
-            "applied {} of {} proposed change(s)",
-            report.applied,
-            set.changes.len()
-        )];
-        body.extend(report.skipped.iter().map(|s| format!("skipped: {s}")));
+        let mut body = vec![format!("applied {applied} of {offered} proposed change(s)")];
+        body.extend(skipped.iter().map(|s| format!("skipped: {s}")));
         self.open_modal("apply", body);
+    }
+
+    /// Add the picked lines as children of `parent`, last first so earlier
+    /// insertions do not move the anchor line.
+    fn apply_sub_items(&mut self, parent: &ItemId, lines: &[String]) -> (usize, Vec<String>) {
+        let Some(item) = self.workspace.items.iter().find(|i| &i.id == parent) else {
+            return (0, vec!["the item is no longer there".to_string()]);
+        };
+        let (file, line, raw, indent) =
+            (item.file.clone(), item.line, item.raw.clone(), item.indent);
+
+        let mut applied = 0;
+        let mut skipped = Vec::new();
+        for (index, text) in lines.iter().enumerate().rev() {
+            if !self.review_selected.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            match store::add_item(&file, line, &raw, indent + 2, text) {
+                Ok(()) => applied += 1,
+                Err(err) => skipped.push(format!("{text:?}: {err}")),
+            }
+        }
+        (applied, skipped)
     }
 
     fn handle_ask_key(&mut self, key: KeyEvent, verb: Verb) {
@@ -1661,7 +1746,34 @@ impl App {
 
     fn open_modal(&mut self, title: &str, body: Vec<String>) {
         self.modal = Some((title.to_string(), body));
+        self.modal_scroll = 0;
         self.mode = Mode::Modal;
+    }
+
+    /// A modal long enough to scroll stays open until dismissed; anything
+    /// else closes on the first keypress, as a report should.
+    fn handle_modal_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let lines = self.modal_rows;
+        let height = view::modal_visible_rows(self.layout.whole, lines);
+        match key.code {
+            K::Down | K::Char('j') => {
+                self.modal_scroll = scroll_by(self.modal_scroll, 1, lines, height)
+            }
+            K::Up | K::Char('k') => {
+                self.modal_scroll = scroll_by(self.modal_scroll, -1, lines, height)
+            }
+            K::PageDown | K::Char(' ') => {
+                self.modal_scroll = scroll_by(self.modal_scroll, height as isize, lines, height)
+            }
+            K::PageUp => {
+                self.modal_scroll = scroll_by(self.modal_scroll, -(height as isize), lines, height)
+            }
+            _ => {
+                self.mode = Mode::Normal;
+                self.modal = None;
+            }
+        }
     }
 
     fn begin_ask(&mut self, verb: Verb) {
@@ -1816,10 +1928,7 @@ fn interpret(verb: Verb, json: &str) -> Event {
             Err(err) => fail(verb, err.to_string()),
         },
         Verb::Breakdown => match agent::string_list(json, "sub_items") {
-            Ok(items) => Event::TaskFinished {
-                title: "proposed sub-items".to_string(),
-                body: items.join("\n"),
-            },
+            Ok(items) => Event::SubItemsProposed(items),
             Err(err) => fail(verb, err.to_string()),
         },
         Verb::Scan => match ChangeSet::parse(json) {
@@ -3373,6 +3482,92 @@ mod tests {
         app.handle(Message::Event(Event::QueryProposed("!done".to_string())));
         assert!(app.query.is_some());
         assert_eq!(app.visible_items().len(), 1, "only alpha is open");
+    }
+
+    #[test]
+    fn breakdown_proposals_go_through_review_rather_than_a_read_only_modal() {
+        // The docs promised review-then-apply; it only ever showed the text.
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::SubItemsProposed(vec![
+            "pull the exhibit".to_string(),
+            "call the CPA".to_string(),
+        ])));
+        assert_eq!(app.mode, Mode::ReviewingChangeSet);
+        assert_eq!(app.review_selected, vec![true, true]);
+        assert_eq!(read(&app), DOC, "nothing written before review");
+    }
+
+    #[test]
+    fn accepted_sub_items_are_added_as_children() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::SubItemsProposed(vec![
+            "first".to_string(),
+            "second".to_string(),
+        ])));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n  - [ ] first\n  - [ ] second\n- [x] beta\n"
+        );
+        let parent = &app.workspace.items[0];
+        assert_eq!(parent.children.len(), 2, "and they nest under the item");
+    }
+
+    #[test]
+    fn unpicked_sub_items_are_left_out() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::SubItemsProposed(vec![
+            "wanted".to_string(),
+            "unwanted".to_string(),
+        ])));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char(' ')); // unpick the second
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let text = read(&app);
+        assert!(text.contains("  - [ ] wanted"));
+        assert!(!text.contains("unwanted"));
+    }
+
+    #[test]
+    fn scrolling_counts_wrapped_rows_not_the_lines_it_was_given() {
+        // Regression: a summary arrives as one long line, so counting lines
+        // said "nothing to scroll" while the screen showed eighteen rows.
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        app.open_modal("summary", vec!["word ".repeat(400)]);
+        with_layout(&mut app);
+
+        assert!(app.modal_rows > 1, "the body wrapped to many rows");
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.modal_scroll, 1, "and it scrolls");
+    }
+
+    #[test]
+    fn a_long_modal_scrolls_instead_of_closing() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        let body: Vec<String> = (0..80).map(|n| format!("line {n:02}")).collect();
+        app.open_modal("summary", body);
+        with_layout(&mut app); // a draw is what measures the wrapped body
+
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.mode, Mode::Modal, "scrolling does not dismiss it");
+        assert_eq!(app.modal_scroll, 1);
+
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.modal_scroll, 0);
+    }
+
+    #[test]
+    fn any_other_key_still_dismisses_a_modal() {
+        let (_d, mut app) = disk_app(DOC);
+        with_layout(&mut app);
+        app.open_modal("summary", vec!["short".to_string()]);
+        with_layout(&mut app);
+        press(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.mode, Mode::Normal);
     }
 
     #[test]

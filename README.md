@@ -300,6 +300,12 @@ Prompt templates get two placeholders: `{items}` is the view as rendered, and
 agent that never saw the paths cannot produce a usable one. `{input}` is
 whatever you typed.
 
+Both writing verbs go through the same review list, so `b` proposes sub-items
+you pick from and the accepted ones are added as children of the item.
+
+Read-only answers open in a panel that scrolls when the text is longer than
+fits — `↑`/`↓` a line, `space` a page, any other key dismisses.
+
 Anything that writes shows you the proposals first, as a list you pick from:
 
 ```

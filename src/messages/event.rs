@@ -17,6 +17,8 @@ pub enum Event {
     },
     /// An agent proposed a change-set awaiting review.
     ChangeSetProposed(crate::agent::ChangeSet),
+    /// An agent proposed sub-items for the selected item.
+    SubItemsProposed(Vec<String>),
     /// An agent returned a query string to adopt.
     QueryProposed(String),
     /// Periodic tick that advances the chyron.

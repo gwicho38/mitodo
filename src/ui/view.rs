@@ -94,6 +94,8 @@ pub fn split_with(
 #[derive(Debug, Clone, Default)]
 pub struct Rendered {
     pub frames: Frames,
+    /// Wrapped rows the modal body came to, for scrolling.
+    pub modal_rows: usize,
     /// Which item each visible row of the item pane showed.
     pub item_rows: Vec<usize>,
     /// Row each item starts at, counting from the top of the whole list.
@@ -116,12 +118,13 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
         render_command_line(app, frame, f.command_line);
     }
     render_status(app, frame, f.status);
-    render_overlay(app, frame, frame.area());
+    let modal_rows = render_overlay(app, frame, frame.area());
     if app.mode == Mode::ViewMenu {
         render_view_menu(app, frame, f.top_bar);
     }
     Rendered {
         frames: f,
+        modal_rows,
         item_rows: items.visible_rows,
         item_starts: items.starts,
         item_total_rows: items.total_rows,
@@ -398,15 +401,15 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
     let popup = review_rect(area);
     let height = review_visible_rows(area);
     let width = popup.width.saturating_sub(2) as usize;
-    let total = set.changes.len();
+    let total = set.len();
     let start = clamp_scroll(app.review_scroll, total, height);
 
     let chosen = app.review_selected.iter().filter(|s| **s).count();
     let mut lines = vec![Line::from(Span::styled(
-        if set.summary.is_empty() {
+        if set.summary().is_empty() {
             format!("{chosen} of {total} selected")
         } else {
-            format!("{} — {chosen} of {total} selected", set.summary)
+            format!("{} — {chosen} of {total} selected", set.summary())
         },
         theme.header(),
     ))];
@@ -504,21 +507,31 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
     );
 }
 
-fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
+/// How many body rows a modal of `rows` wrapped lines can show.
+pub fn modal_visible_rows(area: Rect, rows: usize) -> usize {
+    let height = ((rows as u16).saturating_add(2))
+        .min(area.height.saturating_sub(4))
+        .max(3);
+    height.saturating_sub(2) as usize
+}
+
+/// Draws the overlay, and reports how many wrapped rows the modal body came
+/// to — scrolling has to count what is drawn, not the lines it was given.
+fn render_overlay(app: &App, frame: &mut Frame, area: Rect) -> usize {
     let theme = &app.theme;
     if app.mode == Mode::NewItem {
         render_new_item(app, frame, area);
-        return;
+        return 0;
     }
     if app.mode == Mode::ReviewingChangeSet {
         render_review(app, frame, area);
-        return;
+        return 0;
     }
     let Some((title, body)) = &app.modal else {
-        return;
+        return 0;
     };
     if app.mode != Mode::Modal {
-        return;
+        return 0;
     }
 
     let width = area.width.saturating_sub(8).clamp(20, 100);
@@ -531,6 +544,9 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
     let height = (wrapped.len() as u16 + 2)
         .min(area.height.saturating_sub(4))
         .max(3);
+    let visible = height.saturating_sub(2) as usize;
+    let start = clamp_scroll(app.modal_scroll, wrapped.len(), visible);
+    let more = wrapped.len() > visible;
     let popup = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
@@ -543,6 +559,8 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
         Paragraph::new(
             wrapped
                 .iter()
+                .skip(start)
+                .take(visible)
                 .map(|l| Line::from(Span::styled(l.clone(), theme.paragraph())))
                 .collect::<Vec<_>>(),
         )
@@ -550,10 +568,21 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(theme.eff_border(true))
-                .title(title.clone()),
+                .title(if more {
+                    // Say so, rather than silently cutting the text off.
+                    format!(
+                        "{title} — {}-{} of {} · ↑↓ scrolls",
+                        start + 1,
+                        (start + visible).min(wrapped.len()),
+                        wrapped.len()
+                    )
+                } else {
+                    title.clone()
+                }),
         ),
         popup,
     );
+    wrapped.len()
 }
 
 fn render_command_line(app: &App, frame: &mut Frame, area: Rect) {
