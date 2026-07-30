@@ -5,12 +5,23 @@
 //! the caret so the detail pane can be edited where it is shown.
 
 /// Text being edited, and where the caret sits within it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Editor {
     lines: Vec<String>,
     /// Caret line, and column measured in characters.
     row: usize,
     col: usize,
+}
+
+impl Default for Editor {
+    /// One empty line, never zero: every operation indexes the caret's line.
+    fn default() -> Self {
+        Self {
+            lines: vec![String::new()],
+            row: 0,
+            col: 0,
+        }
+    }
 }
 
 impl Editor {
@@ -138,6 +149,14 @@ mod tests {
         let editor = Editor::new("hello");
         assert_eq!(editor.cursor(), (0, 5), "ready to keep typing");
         assert_eq!(editor.text(), "hello");
+    }
+
+    #[test]
+    fn the_default_editor_is_usable_immediately() {
+        // Regression: a default with no lines panicked on the first keystroke.
+        let mut editor = Editor::default();
+        editor.insert('a');
+        assert_eq!(editor.text(), "a");
     }
 
     #[test]

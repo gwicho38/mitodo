@@ -15,4 +15,6 @@ pub use detect::{Detection, detect};
 pub use model::{Group, Item, ItemId, Priority};
 pub use parse::parse_todo_file;
 pub use workspace::Workspace;
-pub use write::{WriteError, add_item, delete_item, edit_text, set_description, toggle};
+pub use write::{
+    WriteError, add_item, create_item, delete_item, edit_text, set_description, toggle,
+};

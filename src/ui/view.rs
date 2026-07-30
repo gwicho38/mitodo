@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use chrono::Local;
 
 use super::wrap::{truncate, wrap_text};
-use super::{App, Focus, Mode, ViewSetting, chyron};
+use super::{App, Focus, Mode, NewField, NewItem, ViewSetting, chyron};
 
 /// Short deadline marker, and whether it is already past.
 fn due_label(item: &crate::store::model::Item) -> Option<(String, bool)> {
@@ -129,6 +129,144 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
 }
 
 /// Modal and change-set review share one centred overlay.
+/// Where the new-item dialog is drawn.
+pub fn new_item_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(10).clamp(30, 76);
+    let height = area.height.saturating_sub(4).clamp(14, 22);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// The Add button of the new-item dialog.
+pub fn new_item_add_rect(area: Rect) -> Rect {
+    let popup = new_item_rect(area);
+    Rect {
+        x: popup.x + 2,
+        y: popup.y + popup.height.saturating_sub(2),
+        width: "  Add  ".chars().count() as u16,
+        height: 1,
+    }
+}
+
+pub fn new_item_cancel_rect(area: Rect) -> Rect {
+    let add = new_item_add_rect(area);
+    Rect {
+        x: add.x + add.width + 2,
+        y: add.y,
+        width: "  Cancel  ".chars().count() as u16,
+        height: 1,
+    }
+}
+
+/// A Todoist-shaped dialog: title, priority, notes, sub-items.
+fn render_new_item(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    let popup = new_item_rect(area);
+    let inner = popup.width.saturating_sub(2) as usize;
+    let new = &app.new_item;
+    let focused = NewField::ALL[new.field.min(NewField::ALL.len() - 1)];
+
+    let mut lines: Vec<Line> = Vec::new();
+    let mut caret: Option<(u16, u16)> = None;
+
+    for field in NewField::ALL {
+        let is_focused = field == focused;
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", if is_focused { "▸ " } else { "  " }, field.label()),
+            if is_focused {
+                theme.selected(&theme.header())
+            } else {
+                theme.paragraph()
+            },
+        )));
+
+        match field {
+            NewField::Priority => {
+                let mut spans = vec![Span::styled("    ", theme.paragraph())];
+                for band in NewItem::BANDS {
+                    let picked = band == new.priority;
+                    let label = band.map_or("none".to_string(), |p| p.as_str().to_string());
+                    spans.push(Span::styled(
+                        format!("{} {label}  ", if picked { "◉" } else { "○" }),
+                        if picked {
+                            theme.flagged(&theme.header())
+                        } else {
+                            theme.inactive()
+                        },
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+            _ => {
+                let editor = match field {
+                    NewField::Title => &new.title,
+                    NewField::Notes => &new.notes,
+                    _ => &new.sub_items,
+                };
+                let (row, col) = editor.cursor();
+                for (index, text) in editor.lines().iter().enumerate() {
+                    if is_focused && index == row {
+                        caret = Some((4 + col as u16, lines.len() as u16));
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("    {}", truncate(text, inner.saturating_sub(4))),
+                        theme.command_input(),
+                    )));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title("new item — tab moves between fields"),
+        ),
+        popup,
+    );
+
+    let add = new_item_add_rect(area);
+    let cancel = new_item_cancel_rect(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  Add  ",
+            theme.selected(&theme.header()),
+        ))),
+        add,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("  Cancel  ", theme.statusbar()))),
+        cancel,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "  ctrl-s adds · esc cancels".to_string(),
+            theme.paragraph(),
+        ))),
+        Rect {
+            x: cancel.x + cancel.width + 2,
+            y: cancel.y,
+            width: popup
+                .width
+                .saturating_sub(cancel.x + cancel.width + 2 - popup.x)
+                .saturating_sub(1),
+            height: 1,
+        },
+    );
+
+    if let Some((x, y)) = caret {
+        frame.set_cursor_position((popup.x + 1 + x, popup.y + 1 + y));
+    }
+}
+
 /// Where the review list is drawn, so clicks can reach its rows.
 pub fn review_rect(area: Rect) -> Rect {
     let width = area.width.saturating_sub(8).clamp(20, 110);
@@ -306,6 +444,10 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
 
 fn render_overlay(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
+    if app.mode == Mode::NewItem {
+        render_new_item(app, frame, area);
+        return;
+    }
     if app.mode == Mode::ReviewingChangeSet {
         render_review(app, frame, area);
         return;
@@ -859,6 +1001,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         (None, None, Mode::ReviewingChangeSet) => Line::from(Span::styled(
             " apply this change-set? y / n ".to_string(),
             theme.tooltip_warning(),
+        )),
+        (None, None, Mode::NewItem) => Line::from(Span::styled(
+            " tab next field · ctrl-s adds · esc cancels ".to_string(),
+            theme.command_input(),
         )),
         (None, None, Mode::EditingDetail) => Line::from(Span::styled(
             " editing notes · ctrl-s saves · esc discards ".to_string(),

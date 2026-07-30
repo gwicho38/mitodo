@@ -203,6 +203,71 @@ pub fn delete_item(path: &Path, line: usize, expected: &str) -> Result<(), Write
     write_lines(path, &lines, ending, trailing)
 }
 
+/// Create an item, with its notes and children, in one write.
+///
+/// `section` names the `## ` heading it belongs under — that is how a chosen
+/// priority becomes a position in the file. The item lands after the last item
+/// already in that section, so the file keeps its shape; if the section has no
+/// items yet it goes directly beneath the heading, and if there is no such
+/// section at all it is appended to the end.
+pub fn create_item(
+    path: &Path,
+    section: Option<&str>,
+    text: &str,
+    description: &str,
+    children: &[String],
+) -> Result<(), WriteError> {
+    let (mut lines, ending, trailing) = read_lines(path)?;
+
+    let at = match section.and_then(|s| section_insert_point(&lines, s)) {
+        Some(index) => index,
+        None => lines.len(),
+    };
+
+    let mut block = vec![format!("- [ ] {}", text.trim())];
+    for note in description.lines().filter(|l| !l.trim().is_empty()) {
+        block.push(format!("  > {note}"));
+    }
+    for child in children.iter().filter(|c| !c.trim().is_empty()) {
+        block.push(format!("  - [ ] {}", child.trim()));
+    }
+
+    for (offset, line) in block.into_iter().enumerate() {
+        lines.insert(at + offset, line);
+    }
+    write_lines(path, &lines, ending, trailing)
+}
+
+/// Where a new item should go within `section`, or `None` if it is absent.
+fn section_insert_point(lines: &[String], section: &str) -> Option<usize> {
+    let needle = section.trim().to_lowercase();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("## ") && l[3..].trim().to_lowercase().starts_with(&needle))?;
+
+    // The section runs to the next "## " heading, or the end of the file.
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, l)| l.starts_with("## "))
+        .map_or(lines.len(), |(index, _)| index);
+
+    // After the last item in the section, including anything it owns.
+    let last_item = (start + 1..end).rev().find(|i| is_checkbox(&lines[*i]));
+    Some(match last_item {
+        Some(index) => description_end(lines, index),
+        // No items yet: just below the heading, past any blank line.
+        None => (start + 1..end)
+            .find(|i| !lines[*i].trim().is_empty())
+            .unwrap_or(end),
+    })
+}
+
+fn is_checkbox(line: &str) -> bool {
+    line.trim_start().starts_with("- [")
+}
+
 /// Replace the description block beneath an item. An empty or blank
 /// description removes the block entirely.
 pub fn set_description(
@@ -446,6 +511,105 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "## P0\n\n- [ ] first\n  > one\n  > two\n- [x] second\n"
+        );
+    }
+
+    // --- creating an item ---
+
+    const SECTIONED: &str =
+        "## P0 — Critical\n\n- [ ] urgent one\n\n## P1 — High\n\n- [ ] later one\n";
+
+    #[test]
+    fn a_new_item_lands_in_the_named_section() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(&path, Some("P1"), "fresh", "", &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## P0 — Critical\n\n- [ ] urgent one\n\n## P1 — High\n\n- [ ] later one\n- [ ] fresh\n"
+        );
+    }
+
+    #[test]
+    fn it_goes_after_the_last_item_of_that_section_only() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(&path, Some("P0"), "fresh", "", &[]).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let fresh = text.find("fresh").unwrap();
+        let p1 = text.find("## P1").unwrap();
+        assert!(fresh < p1, "stays inside its own section");
+    }
+
+    #[test]
+    fn notes_and_children_are_written_with_it() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(
+            &path,
+            Some("P1"),
+            "parent",
+            "why it matters",
+            &["first".to_string(), "second".to_string()],
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("- [ ] parent\n  > why it matters\n  - [ ] first\n  - [ ] second\n"));
+    }
+
+    #[test]
+    fn blank_notes_and_children_are_skipped() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(
+            &path,
+            Some("P1"),
+            "bare",
+            "  \n",
+            &["".to_string(), "  ".to_string()],
+        )
+        .unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("- [ ] bare\n"));
+        assert!(!text.contains("  > "), "no empty note line");
+    }
+
+    #[test]
+    fn an_empty_section_takes_the_item_under_its_heading() {
+        let (_d, path) = write_temp("## P0 — Critical\n\n## P1 — High\n\n- [ ] later\n");
+        create_item(&path, Some("P0"), "first ever", "", &[]).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let item = text.find("first ever").unwrap();
+        let p1 = text.find("## P1").unwrap();
+        assert!(item < p1, "lands in the empty P0 section, not after P1");
+    }
+
+    #[test]
+    fn an_unknown_section_appends_to_the_end() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(&path, Some("P3"), "orphan", "", &[]).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("- [ ] orphan\n")
+        );
+    }
+
+    #[test]
+    fn no_section_appends_to_the_end() {
+        let (_d, path) = write_temp(SECTIONED);
+        create_item(&path, None, "orphan", "", &[]).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("- [ ] orphan\n")
+        );
+    }
+
+    #[test]
+    fn creating_leaves_the_rest_of_the_file_byte_identical() {
+        let messy = "---\ntags: [a]\n---\n\n## P0 — Critical\n\n- [ ] keep\t\n\n## P1 — High\n\n- [ ] also keep\n";
+        let (_d, path) = write_temp(messy);
+        create_item(&path, Some("P0"), "new", "", &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            messy.replace("- [ ] keep\t\n", "- [ ] keep\t\n- [ ] new\n")
         );
     }
 

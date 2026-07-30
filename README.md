@@ -130,7 +130,8 @@ Arrows work the list and the tree; `hjkl` moves between panes.
 | | | | |
 |---|---|---|---|
 | `↑` `↓` | move / scroll | `space` `x` | toggle done |
-| `→` | open a node, then step into it | `a` `A` | add sibling / child |
+| `→` | open a node, then step into it | `a` | new item (dialog) |
+| | | `o` `A` | quick add sibling / child |
 | `←` | close a node, then step out to its parent | `e` | edit text |
 | `g` `G` | first / last | `i` | edit notes in the pane |
 | `h` `j` `k` `l` | move between panes | `d` | delete (asks first) |
@@ -154,6 +155,40 @@ scrollback back to your terminal.
 
 The wheel scrolls the *view* and leaves your selection where it is, the way
 scrolling works everywhere else.
+
+## Adding an item
+
+`a` opens a dialog: title, priority, notes and sub-items in one place.
+
+```
+┌new item — tab moves between fields ─────────────────────┐
+│▸ title                                                  │
+│    Draft the LLC agreement                              │
+│                                                         │
+│  priority                                               │
+│    ○ P0  ◉ P1  ○ P2  ○ P3  ○ none                       │
+│                                                         │
+│  notes                                                  │
+│    needs Dylan sign-off                                 │
+│                                                         │
+│  sub-items (one per line)                               │
+│    pull the template                                    │
+│    send for review                                      │
+│                                                         │
+│  Add      Cancel      ctrl-s adds · esc cancels         │
+└─────────────────────────────────────────────────────────┘
+```
+
+`tab` moves between fields, arrows or `0`–`3` pick the priority, `ctrl-s` adds
+and `esc` cancels — and **Add** and **Cancel** are clickable. `enter` submits
+from the title, and makes a new line in the notes and sub-item boxes.
+
+The priority decides where the item goes: choosing P1 files it under that
+group's `## P1` heading, after whatever is already there. Notes become the
+item's blockquote and sub-items become its children, all in one write.
+
+`o` still adds a plain sibling below the selection without the dialog, and `A`
+adds a child.
 
 ## Queries
 

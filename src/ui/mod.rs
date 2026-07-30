@@ -19,7 +19,7 @@ use crate::messages::{Event, Message};
 use crate::prelude::*;
 use crate::query::Query;
 use crate::store::Workspace;
-use crate::store::model::{Group, Item, ItemId};
+use crate::store::model::{Group, Item, ItemId, Priority};
 use crate::store::{self, WriteError};
 use chyron::TickerState;
 use edit::Editor;
@@ -122,6 +122,97 @@ pub enum Mode {
     ViewMenu,
     /// Editing the notes inside the detail pane.
     EditingDetail,
+    /// The new-item dialog is open.
+    NewItem,
+}
+
+/// Which part of the new-item dialog has focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewField {
+    Title,
+    Priority,
+    Notes,
+    SubItems,
+}
+
+impl NewField {
+    pub const ALL: [NewField; 4] = [
+        NewField::Title,
+        NewField::Priority,
+        NewField::Notes,
+        NewField::SubItems,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NewField::Title => "title",
+            NewField::Priority => "priority",
+            NewField::Notes => "notes",
+            NewField::SubItems => "sub-items (one per line)",
+        }
+    }
+}
+
+/// The new-item dialog's contents.
+#[derive(Debug, Clone, Default)]
+pub struct NewItem {
+    pub title: Editor,
+    pub notes: Editor,
+    pub sub_items: Editor,
+    /// `None` means no priority section.
+    pub priority: Option<Priority>,
+    pub field: usize,
+}
+
+impl NewItem {
+    /// The bands offered, most urgent first, ending with "none".
+    pub const BANDS: [Option<Priority>; 5] = [
+        Some(Priority::P0),
+        Some(Priority::P1),
+        Some(Priority::P2),
+        Some(Priority::P3),
+        None,
+    ];
+
+    fn current(&self) -> NewField {
+        NewField::ALL[self.field.min(NewField::ALL.len() - 1)]
+    }
+
+    fn editor_mut(&mut self) -> Option<&mut Editor> {
+        match self.current() {
+            NewField::Title => Some(&mut self.title),
+            NewField::Notes => Some(&mut self.notes),
+            NewField::SubItems => Some(&mut self.sub_items),
+            NewField::Priority => None,
+        }
+    }
+
+    fn cycle_priority(&mut self, forward: bool) {
+        let at = Self::BANDS
+            .iter()
+            .position(|b| *b == self.priority)
+            .unwrap_or(4);
+        let next = if forward {
+            (at + 1) % Self::BANDS.len()
+        } else {
+            (at + Self::BANDS.len() - 1) % Self::BANDS.len()
+        };
+        self.priority = Self::BANDS[next];
+    }
+
+    /// The section heading a chosen priority implies.
+    pub fn section(&self) -> Option<String> {
+        self.priority.map(|p| p.as_str().to_string())
+    }
+
+    pub fn children(&self) -> Vec<String> {
+        self.sub_items
+            .text()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
 }
 
 /// A toggle in the view menu.
@@ -210,6 +301,8 @@ pub struct App {
     pub detail_scroll: usize,
     /// Notes being edited in the detail pane.
     pub editor: Editor,
+    /// The new-item dialog, while it is open.
+    pub new_item: NewItem,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
@@ -270,6 +363,7 @@ impl App {
             collapsed: std::collections::HashSet::new(),
             detail_scroll: 0,
             editor: Editor::default(),
+            new_item: NewItem::default(),
             view_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
@@ -588,6 +682,7 @@ impl App {
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
             Mode::EditingDetail => self.handle_detail_key(key),
+            Mode::NewItem => self.handle_new_item_key(key),
         }
     }
 
@@ -647,6 +742,108 @@ impl App {
         let text = self.editor.text();
         let result = store::set_description(&file, line, &raw, &text);
         self.after_write(result, "notes");
+    }
+
+    /// Open the new-item dialog, seeded with the group's usual priority.
+    pub fn begin_new_item(&mut self) {
+        let mut new = NewItem {
+            priority: self
+                .selected_item()
+                .map(|i| i.priority)
+                .filter(|p| *p != Priority::None),
+            ..Default::default()
+        };
+        new.field = 0;
+        self.new_item = new;
+        self.mode = Mode::NewItem;
+    }
+
+    fn handle_new_item_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                K::Char('s') => self.commit_new_item(),
+                K::Char('c') => self.cancel_new_item(),
+                _ => {}
+            }
+            return;
+        }
+
+        let fields = NewField::ALL.len();
+        match key.code {
+            K::Esc => self.cancel_new_item(),
+            K::Tab => self.new_item.field = (self.new_item.field + 1) % fields,
+            K::BackTab => self.new_item.field = (self.new_item.field + fields - 1) % fields,
+            _ if self.new_item.current() == NewField::Priority => match key.code {
+                K::Left => self.new_item.cycle_priority(false),
+                K::Right | K::Char(' ') => self.new_item.cycle_priority(true),
+                K::Char(c @ '0'..='3') => {
+                    self.new_item.priority = NewItem::BANDS[c as usize - '0' as usize]
+                }
+                K::Enter => self.commit_new_item(),
+                _ => {}
+            },
+            // The title is one line, so enter submits from there.
+            K::Enter if self.new_item.current() == NewField::Title => self.commit_new_item(),
+            _ => {
+                if let Some(editor) = self.new_item.editor_mut() {
+                    match key.code {
+                        K::Enter => editor.newline(),
+                        K::Backspace => editor.backspace(),
+                        K::Delete => editor.delete(),
+                        K::Left => editor.left(),
+                        K::Right => editor.right(),
+                        K::Up => editor.up(),
+                        K::Down => editor.down(),
+                        K::Home => editor.home(),
+                        K::End => editor.end(),
+                        K::Char(c) => editor.insert(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    fn cancel_new_item(&mut self) {
+        self.mode = Mode::Normal;
+        self.new_item = NewItem::default();
+    }
+
+    /// Write the dialog's contents as a new item.
+    fn commit_new_item(&mut self) {
+        let title = self.new_item.title.text().trim().to_string();
+        if title.is_empty() {
+            self.notice = Some("a new item needs a title".to_string());
+            return;
+        }
+        let Some(file) = self.target_file() else {
+            self.notice = Some("no todo file to add to".to_string());
+            return;
+        };
+
+        let result = store::create_item(
+            &file,
+            self.new_item.section().as_deref(),
+            &title,
+            &self.new_item.notes.text(),
+            &self.new_item.children(),
+        );
+        self.mode = Mode::Normal;
+        self.new_item = NewItem::default();
+        self.after_write(result, "add");
+    }
+
+    /// Which file a new item belongs in: the selected group's, else the
+    /// selected item's, else the first group's.
+    fn target_file(&self) -> Option<PathBuf> {
+        if let Some(group) = self.selected_group() {
+            return Some(group.todo_file.clone());
+        }
+        if let Some(item) = self.selected_item() {
+            return Some(item.file.clone());
+        }
+        self.workspace.groups.first().map(|g| g.todo_file.clone())
     }
 
     /// Whether a view setting is currently on.
@@ -925,7 +1122,8 @@ impl App {
             (K::Char('H'), _) => self.toggle_hide_done(),
 
             (K::Char(' '), _) | (K::Char('x'), KeyModifiers::NONE) => self.toggle_selected(),
-            (K::Char('a'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
+            (K::Char('a'), KeyModifiers::NONE) => self.begin_new_item(),
+            (K::Char('o'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
             (K::Char('A'), _) => self.begin_edit(EditKind::AddChild, false),
             (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
             (K::Char('i'), KeyModifiers::NONE) => self.begin_detail_edit(),
@@ -987,6 +1185,19 @@ impl App {
         if self.mode == Mode::ViewMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.click_view_menu(x, y);
+            }
+            return;
+        }
+
+        // The new-item dialog takes clicks on its buttons.
+        if self.mode == Mode::NewItem {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                let whole = self.layout.whole;
+                if within(view::new_item_add_rect(whole), x, y) {
+                    self.commit_new_item();
+                } else if within(view::new_item_cancel_rect(whole), x, y) {
+                    self.cancel_new_item();
+                }
             }
             return;
         }
@@ -1594,7 +1805,7 @@ fn help_lines() -> Vec<String> {
         "  h/j/k/l  move between panes · tab items · shift-tab groups",
         "",
         "items",
-        "  space/x  toggle done  a/A  add sibling/child",
+        "  space/x  toggle done   a  new item · o  quick add · A  add child",
         "  e  edit text          i  edit notes in the detail pane",
         "     while editing notes: ctrl-s saves · esc discards",
         "  z  fold / unfold       Z  fold / unfold all",
@@ -2042,9 +2253,9 @@ mod tests {
     }
 
     #[test]
-    fn a_adds_a_sibling_below_the_selection() {
+    fn o_adds_a_sibling_below_the_selection() {
         let (_d, mut app) = disk_app(DOC);
-        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('o'));
         type_text(&mut app, "inserted");
         assert_eq!(
             read(&app),
@@ -3154,6 +3365,207 @@ mod tests {
         app.handle(Message::Event(Event::ChangeSetProposed(set)));
     }
 
+    // --- the new-item dialog ---
+
+    const SECTIONED: &str = "## P0 — Critical\n\n- [ ] urgent\n\n## P1 — High\n\n- [ ] later\n";
+
+    fn type_into(app: &mut App, text: &str) {
+        for c in text.chars() {
+            press(app, KeyCode::Char(c));
+        }
+    }
+
+    fn tab(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    }
+
+    fn ctrl_s(app: &mut App) {
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn a_opens_the_new_item_dialog() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.mode, Mode::NewItem);
+        assert_eq!(app.new_item.field, 0, "starts on the title");
+    }
+
+    #[test]
+    fn tab_cycles_the_fields_and_wraps() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        for expected in [1, 2, 3, 0] {
+            tab(&mut app);
+            assert_eq!(app.new_item.field, expected);
+        }
+    }
+
+    #[test]
+    fn the_title_is_typed_into_the_first_field() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "call the CPA");
+        assert_eq!(app.new_item.title.text(), "call the CPA");
+    }
+
+    #[test]
+    fn priority_is_chosen_with_arrows_or_digits() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        tab(&mut app); // priority
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert_eq!(app.new_item.priority, Some(Priority::P0));
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.new_item.priority, Some(Priority::P1));
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.new_item.priority, Some(Priority::P0));
+    }
+
+    #[test]
+    fn priority_cycles_round_through_none() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        tab(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.new_item.priority, None, "past P3 is no priority");
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.new_item.priority, Some(Priority::P0), "and round again");
+    }
+
+    #[test]
+    fn the_item_lands_in_the_section_its_priority_names() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "new urgent thing");
+        tab(&mut app);
+        app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        ctrl_s(&mut app);
+
+        let text = read(&app);
+        let new = text.find("new urgent thing").unwrap();
+        let p1 = text.find("## P1").unwrap();
+        assert!(new < p1, "P0 item goes in the P0 section");
+    }
+
+    #[test]
+    fn notes_and_sub_items_are_written_with_the_item() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "parent task");
+        tab(&mut app); // priority
+        app.handle_key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+        tab(&mut app); // notes
+        type_into(&mut app, "why it matters");
+        tab(&mut app); // sub-items
+        type_into(&mut app, "first step");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_into(&mut app, "second step");
+        ctrl_s(&mut app);
+
+        let text = read(&app);
+        assert!(text.contains("- [ ] parent task"));
+        assert!(text.contains("  > why it matters"));
+        assert!(text.contains("  - [ ] first step"));
+        assert!(text.contains("  - [ ] second step"));
+    }
+
+    #[test]
+    fn the_new_item_and_its_children_are_parsed_back() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "parent task");
+        tab(&mut app);
+        tab(&mut app);
+        tab(&mut app);
+        type_into(&mut app, "a child");
+        ctrl_s(&mut app);
+
+        let parent = app
+            .workspace
+            .items
+            .iter()
+            .find(|i| i.text == "parent task")
+            .expect("the new item is in the workspace");
+        assert_eq!(parent.children.len(), 1, "the child nests under it");
+    }
+
+    #[test]
+    fn a_title_is_required() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        ctrl_s(&mut app);
+        assert_eq!(app.mode, Mode::NewItem, "stays open to be filled in");
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("needs a title")
+        );
+        assert_eq!(read(&app), SECTIONED, "nothing written");
+    }
+
+    #[test]
+    fn esc_cancels_the_dialog() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "abandoned");
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), SECTIONED);
+    }
+
+    #[test]
+    fn enter_on_the_title_submits() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "quick one");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(read(&app).contains("- [ ] quick one"));
+    }
+
+    #[test]
+    fn enter_in_the_notes_makes_a_new_line_rather_than_submitting() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "titled");
+        tab(&mut app);
+        tab(&mut app); // notes
+        type_into(&mut app, "one");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_into(&mut app, "two");
+        assert_eq!(app.mode, Mode::NewItem, "still open");
+        assert_eq!(app.new_item.notes.text(), "one\ntwo");
+    }
+
+    #[test]
+    fn clicking_add_and_cancel_work() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        with_layout(&mut app);
+        let cancel = view::new_item_cancel_rect(app.layout.whole);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            cancel.x + 2,
+            cancel.y,
+        ));
+        assert_eq!(app.mode, Mode::Normal, "cancel dismisses");
+
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "by button");
+        with_layout(&mut app);
+        let add = view::new_item_add_rect(app.layout.whole);
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            add.x + 2,
+            add.y,
+        ));
+        assert!(read(&app).contains("- [ ] by button"));
+    }
+
     // --- the tree ---
 
     const TREE: &str = "## P0 — Critical\n\n- [ ] parent one\n  - [ ] child a\n    - [ ] grandchild\n  - [ ] child b\n- [ ] parent two\n";
@@ -3699,8 +4111,8 @@ mod tests {
         let (_d, mut app) = disk_app("## P0 — Critical\n");
         assert!(app.selected_item().is_none());
         press(&mut app, KeyCode::Char(' '));
-        press(&mut app, KeyCode::Char('a'));
-        assert_eq!(app.mode, Mode::Normal, "no editor opened without an anchor");
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.mode, Mode::Normal, "quick add needs an anchor item");
         assert!(app.notice.is_some());
     }
 
