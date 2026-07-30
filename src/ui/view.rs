@@ -890,16 +890,57 @@ pub fn clamp_scroll(scroll: usize, len: usize, height: usize) -> usize {
     scroll.min(len - height)
 }
 
+/// Rows always left for typing, however long the item's title is.
+const MIN_EDIT_ROWS: usize = 2;
+
 /// The notes editor, drawn inside the detail pane with a real caret.
 fn render_detail_editor(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
     let width = area.width.saturating_sub(2) as usize;
     let (row, col) = app.editor.cursor();
 
+    // Keep the item in view while its notes are being written: losing sight of
+    // what you are annotating is the whole problem with a bare edit box.
+    // The header is budgeted against the pane, and degrades rather than
+    // vanishing: the title matters most, the metadata and rule are trimmed
+    // first, and typing always keeps a couple of rows.
+    let content_height = area.height.saturating_sub(2) as usize;
+    let mut budget = content_height.saturating_sub(MIN_EDIT_ROWS);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(item) = app.selected_item()
+        && budget >= 1
+    {
+        let title = wrap_text(&item.text, width.max(1));
+        let rows = title.len().min(3).min(budget);
+        for line in title.iter().take(rows) {
+            lines.push(Line::from(Span::styled(line.clone(), theme.header())));
+        }
+        budget -= rows;
+
+        if title.len() > rows && budget >= 1 {
+            lines.push(Line::from(Span::styled("…".to_string(), theme.header())));
+            budget -= 1;
+        }
+        if budget >= 2 {
+            lines.push(Line::from(Span::styled(
+                format!("{} · {}", item.priority.as_str(), item.section),
+                theme.inactive(),
+            )));
+            budget -= 1;
+        }
+        if budget >= 1 {
+            lines.push(Line::from(Span::styled(
+                "─".repeat(width.max(1)),
+                theme.inactive(),
+            )));
+        }
+    }
+    let header = lines.len() as u16;
+
     // Wrap each logical line, remembering where the caret lands so the
     // terminal cursor can be put on the right wrapped row.
-    let mut lines: Vec<Line> = Vec::new();
-    let mut caret: (u16, u16) = (0, 0);
+    let mut caret: (u16, u16) = (0, header);
     for (index, logical) in app.editor.lines().iter().enumerate() {
         let segments = if logical.is_empty() {
             vec![String::new()]
@@ -1308,6 +1349,53 @@ mod tests {
         app.workspace.items[0].description = "needs CPA sign-off".to_string();
         let rows = draw_app(&app, 80, 24).join("\n");
         assert!(rows.contains("needs CPA sign-off"));
+    }
+
+    #[test]
+    fn editing_notes_keeps_the_item_in_view() {
+        use super::super::Mode;
+        let mut app = test_app();
+        app.mode = Mode::EditingDetail;
+        app.editor = crate::ui::edit::Editor::new("a note");
+
+        let rows = draw_app(&app, 90, 24).join("\n");
+        assert!(
+            rows.contains("file the 83(b)"),
+            "the title stays visible while its notes are written"
+        );
+        assert!(rows.contains("P0 — Critical"), "and where it lives");
+        assert!(rows.contains("a note"), "alongside the notes being edited");
+    }
+
+    #[test]
+    fn a_long_title_is_cut_rather_than_filling_the_pane() {
+        use super::super::Mode;
+        let mut app = test_app();
+        app.workspace.items[0].text = "word ".repeat(120);
+        app.mode = Mode::EditingDetail;
+        app.editor = crate::ui::edit::Editor::new("still typing here");
+
+        let rows = draw_app(&app, 60, 34).join("\n");
+        assert!(rows.contains("…"), "the header is cut");
+        assert!(
+            rows.contains("still typing here"),
+            "and there is still room to type"
+        );
+    }
+
+    #[test]
+    fn a_pane_too_short_for_a_header_gives_the_room_to_typing() {
+        use super::super::Mode;
+        let mut app = test_app();
+        app.workspace.items[0].text = "word ".repeat(120);
+        app.mode = Mode::EditingDetail;
+        app.editor = crate::ui::edit::Editor::new("still typing here");
+
+        let rows = draw_app(&app, 60, 20).join("\n");
+        assert!(
+            rows.contains("still typing here"),
+            "typing wins when there is no room for both"
+        );
     }
 
     #[test]
