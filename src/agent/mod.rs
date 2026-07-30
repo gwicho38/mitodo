@@ -87,8 +87,10 @@ impl Verb {
                  Reply with JSON only.\n\nRequest: {input}"
             }
             Verb::Summarize => {
-                "Summarise these todo items in a few sentences: the themes, what looks \
-                 stale, and what blocks what. Reply with JSON only.\n\n{items}"
+                "Summarise these todo items: the themes, what looks stale, and what \
+                 blocks what.\n\nReply with JSON matching the schema. The \"brief\" value \
+                 must be plain prose written for a person to read — a few sentences or \
+                 short dashed lines. Do not put JSON, objects or arrays inside it.\n\n{items}"
             }
             Verb::Breakdown => {
                 "Break this todo item into concrete next actions. Return between two and \
@@ -181,24 +183,138 @@ pub fn run(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Find the JSON object in an agent's reply.
+///
+/// Models wrap their answers: a markdown fence, a sentence of preamble, or a
+/// transport envelope carrying the real payload as a string. Insisting on a
+/// bare object is what leaks raw JSON into the UI, so this digs the object out
+/// of whatever it arrived in.
+pub fn extract_json(raw: &str) -> Option<serde_json::Value> {
+    let text = raw.trim();
+
+    // A fenced block, with or without a language tag.
+    let unfenced = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```"))
+        .and_then(|rest| rest.rsplit_once("```").map(|(body, _)| body))
+        .unwrap_or(text)
+        .trim();
+
+    let candidate = match serde_json::from_str::<serde_json::Value>(unfenced) {
+        Ok(value) => value,
+        // Prose around the object: take the outermost braces.
+        Err(_) => {
+            let start = unfenced.find('{')?;
+            let end = unfenced.rfind('}')?;
+            serde_json::from_str(unfenced.get(start..=end)?).ok()?
+        }
+    };
+
+    // Some CLIs return {"result": "<the real json>"}.
+    for envelope in ["result", "content", "text", "output"] {
+        if let Some(inner) = candidate.get(envelope).and_then(|v| v.as_str())
+            && let Some(parsed) = extract_json(inner)
+        {
+            return Some(parsed);
+        }
+    }
+    Some(candidate)
+}
+
+/// Render a JSON value as something a person can read.
+///
+/// Models sometimes satisfy a string schema by stuffing JSON into the string.
+/// Rather than showing that raw, flatten it: keys become labels and arrays
+/// become dashed lines.
+pub fn humanise(value: &serde_json::Value, depth: usize) -> Vec<String> {
+    let pad = "  ".repeat(depth);
+    match value {
+        serde_json::Value::String(text) => vec![format!("{pad}{text}")],
+        serde_json::Value::Number(n) => vec![format!("{pad}{n}")],
+        serde_json::Value::Bool(b) => vec![format!("{pad}{b}")],
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .flat_map(|item| match item {
+                serde_json::Value::String(text) => vec![format!("{pad}- {text}")],
+                other => humanise(other, depth),
+            })
+            .collect(),
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .flat_map(|(key, field)| {
+                let label = key.replace('_', " ");
+                match field {
+                    serde_json::Value::String(text) => vec![format!("{pad}{label}: {text}")],
+                    other => {
+                        let mut lines = vec![format!("{pad}{label}:")];
+                        lines.extend(humanise(other, depth + 1));
+                        lines
+                    }
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Turn whatever the agent said into readable text.
+///
+/// A string that is itself JSON gets flattened, because a schema-obedient
+/// model will happily nest one inside the other.
+fn readable(text: &str) -> String {
+    match extract_json(text) {
+        Some(value) if !value.is_string() => humanise(&value, 0).join("\n"),
+        _ => text.to_string(),
+    }
+}
+
 /// Pull a single string field out of an agent's JSON reply.
+///
+/// Falls back to the first string in the object, then to the raw text, because
+/// a readable answer in the wrong field beats showing the user JSON.
 pub fn field(json: &str, name: &str) -> Result<String, AgentError> {
-    let value: serde_json::Value =
-        serde_json::from_str(json.trim()).map_err(|e| AgentError::BadJson(e.to_string()))?;
-    value
-        .get(name)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| AgentError::BadJson(format!("missing string field {name:?}")))
+    let Some(value) = extract_json(json) else {
+        let text = json.trim();
+        return if text.is_empty() {
+            Err(AgentError::BadJson("the agent said nothing".to_string()))
+        } else {
+            Ok(text.to_string())
+        };
+    };
+
+    if let Some(found) = value.get(name).and_then(|v| v.as_str()) {
+        return Ok(readable(found));
+    }
+    if let Some(object) = value.as_object()
+        && let Some(first) = object.values().find_map(|v| v.as_str())
+    {
+        return Ok(readable(first));
+    }
+    if let Some(text) = value.as_str() {
+        return Ok(readable(text));
+    }
+    // Structured, but not in the shape asked for: show it readably rather than
+    // failing or putting JSON on screen.
+    Ok(humanise(&value, 0).join("\n"))
 }
 
 /// Pull an array-of-strings field out of an agent's JSON reply.
 pub fn string_list(json: &str, name: &str) -> Result<Vec<String>, AgentError> {
-    let value: serde_json::Value =
-        serde_json::from_str(json.trim()).map_err(|e| AgentError::BadJson(e.to_string()))?;
+    let value = extract_json(json).ok_or_else(|| AgentError::BadJson("not JSON".to_string()))?;
     let array = value
         .get(name)
         .and_then(|v| v.as_array())
+        // Any array of strings will do if the name does not match.
+        .or_else(|| {
+            value
+                .as_object()?
+                .values()
+                .find(|v| {
+                    v.as_array()
+                        .is_some_and(|a| a.iter().all(|i| i.is_string()))
+                })?
+                .as_array()
+        })
         .ok_or_else(|| AgentError::BadJson(format!("missing array field {name:?}")))?;
     Ok(array
         .iter()
@@ -341,15 +457,94 @@ mod tests {
     }
 
     #[test]
-    fn malformed_json_is_rejected_cleanly() {
-        assert!(matches!(
-            field("not json", "query"),
-            Err(AgentError::BadJson(_))
-        ));
-        assert!(matches!(
-            field(r#"{"other":1}"#, "query"),
-            Err(AgentError::BadJson(_))
-        ));
+    fn a_fenced_reply_is_unwrapped() {
+        let fenced = "```json\n{\"brief\":\"all quiet\"}\n```";
+        assert_eq!(field(fenced, "brief").unwrap(), "all quiet");
+        let bare_fence = "```\n{\"brief\":\"all quiet\"}\n```";
+        assert_eq!(field(bare_fence, "brief").unwrap(), "all quiet");
+    }
+
+    #[test]
+    fn preamble_around_the_object_is_ignored() {
+        let chatty = "Sure! Here you go:\n{\"brief\":\"all quiet\"}\nHope that helps.";
+        assert_eq!(field(chatty, "brief").unwrap(), "all quiet");
+    }
+
+    #[test]
+    fn a_transport_envelope_is_unwrapped() {
+        let enveloped = r#"{"type":"result","result":"{\"brief\":\"all quiet\"}"}"#;
+        assert_eq!(field(enveloped, "brief").unwrap(), "all quiet");
+    }
+
+    #[test]
+    fn a_differently_named_field_still_yields_its_text() {
+        // Better a readable answer from the wrong key than raw JSON on screen.
+        assert_eq!(
+            field(r#"{"summary":"all quiet"}"#, "brief").unwrap(),
+            "all quiet"
+        );
+    }
+
+    #[test]
+    fn json_stuffed_into_the_string_field_is_flattened() {
+        // What a schema-obedient model actually did: satisfy {brief: string}
+        // by putting a JSON document inside the string.
+        let nested = r#"{"brief":"{\"themes\":[\"deadlines\",\"chasing signatures\"]}"}"#;
+        let out = field(nested, "brief").unwrap();
+        assert!(!out.contains('{'), "no raw JSON on screen: {out}");
+        assert!(out.contains("- deadlines"), "arrays become lines: {out}");
+        assert!(out.contains("themes:"), "keys become labels: {out}");
+    }
+
+    #[test]
+    fn a_reply_in_the_wrong_shape_is_still_readable() {
+        let wrong = r#"{"themes":["a","b"],"stale":[{"item":"x","why":"late"}]}"#;
+        let out = field(wrong, "brief").unwrap();
+        assert!(!out.contains("{\""), "no raw JSON: {out}");
+        assert!(out.contains("- a") && out.contains("- b"));
+        assert!(out.contains("item: x") && out.contains("why: late"));
+    }
+
+    #[test]
+    fn prose_is_left_alone() {
+        let plain = r#"{"brief":"Two filings are overdue and one needs a notary."}"#;
+        assert_eq!(
+            field(plain, "brief").unwrap(),
+            "Two filings are overdue and one needs a notary."
+        );
+    }
+
+    #[test]
+    fn the_summarize_prompt_asks_for_prose() {
+        let prompt = Verb::Summarize.default_prompt();
+        assert!(
+            prompt.contains("plain prose"),
+            "the schema alone is not enough"
+        );
+        assert!(prompt.contains("Do not put JSON"));
+    }
+
+    #[test]
+    fn a_plain_text_reply_is_shown_as_it_is() {
+        assert_eq!(
+            field("just a sentence", "brief").unwrap(),
+            "just a sentence"
+        );
+    }
+
+    #[test]
+    fn an_empty_reply_is_an_error() {
+        assert!(matches!(field("   ", "brief"), Err(AgentError::BadJson(_))));
+    }
+
+    #[test]
+    fn a_list_under_another_name_is_still_found() {
+        let items = string_list(r#"{"items":["a","b"]}"#, "sub_items").unwrap();
+        assert_eq!(items, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn a_reply_with_no_list_at_all_is_rejected() {
         assert!(matches!(
             string_list(r#"{"sub_items":"not an array"}"#, "sub_items"),
             Err(AgentError::BadJson(_))

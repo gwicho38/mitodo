@@ -306,6 +306,11 @@ you pick from and the accepted ones are added as children of the item.
 Read-only answers open in a panel that scrolls when the text is longer than
 fits — `↑`/`↓` a line, `space` a page, any other key dismisses.
 
+Replies are read leniently: a fenced code block, a sentence of preamble or a
+transport envelope are all unwrapped, and a model that answers in the wrong
+shape — or nests JSON inside the string it was asked for — is flattened into
+readable lines rather than shown as raw JSON.
+
 Anything that writes shows you the proposals first, as a list you pick from:
 
 ```

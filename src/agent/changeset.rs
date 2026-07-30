@@ -51,8 +51,12 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
+    /// Parse a reply, tolerating the wrappers models put around JSON.
     pub fn parse(json: &str) -> Result<ChangeSet, serde_json::Error> {
-        serde_json::from_str(json.trim())
+        match super::extract_json(json) {
+            Some(value) => serde_json::from_value(value),
+            None => serde_json::from_str(json.trim()),
+        }
     }
 
     /// A one-line summary of a change, for the review list.
@@ -212,6 +216,13 @@ mod tests {
         assert_eq!(parsed.summary, "two things");
         assert_eq!(parsed.changes.len(), 1);
         assert_eq!(parsed.changes[0].action, ChangeAction::Add);
+    }
+
+    #[test]
+    fn a_fenced_change_set_is_parsed() {
+        let fenced = "```json\n{\"summary\":\"s\",\"changes\":[{\"file\":\"f\",\"action\":\"add\",\"content\":\"c\",\"reason\":\"r\"}]}\n```";
+        let parsed = ChangeSet::parse(fenced).expect("fenced JSON parses");
+        assert_eq!(parsed.changes.len(), 1);
     }
 
     #[test]
