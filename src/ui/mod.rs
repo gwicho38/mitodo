@@ -1284,6 +1284,13 @@ impl App {
             (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
             (K::Char('S'), _) => self.spawn_agent(Verb::Summarize, String::new()),
+            (K::Char('E'), _) => {
+                if self.selected_item().is_some() {
+                    self.spawn_agent(Verb::Explain, String::new())
+                } else {
+                    self.notice = Some("no item selected".to_string())
+                }
+            }
             (K::Char('b'), KeyModifiers::NONE) => match self.selected_item() {
                 Some(item) => {
                     let text = item.text.clone();
@@ -1786,6 +1793,52 @@ impl App {
     }
 
     /// Everything the agent needs about the current view, as plain text.
+    /// The selected item on its own: what it says, where it lives, and
+    /// anything hanging off it. This is what the per-item verbs are sent.
+    fn item_context(&self) -> String {
+        let Some(item) = self.selected_item() else {
+            return String::new();
+        };
+        let mut out = format!("Item: {}\n", item.text);
+        out.push_str(&format!(
+            "Priority: {} · Section: {} · Heading: {}\n",
+            item.priority.as_str(),
+            item.section,
+            item.heading
+        ));
+        if let Some(group) = self.workspace.group_name_for(item) {
+            out.push_str(&format!("Group: {group}\n"));
+        }
+        if let Some(due) = item.due {
+            out.push_str(&format!("Due: {}\n", due.format("%Y-%m-%d")));
+        }
+        out.push_str(&format!(
+            "Status: {}\n",
+            if item.done { "finished" } else { "open" }
+        ));
+        if !item.description.is_empty() {
+            out.push_str(&format!("Notes:\n{}\n", item.description));
+        }
+
+        let children: Vec<&Item> = self
+            .workspace
+            .items
+            .iter()
+            .filter(|i| i.parent.as_ref() == Some(&item.id))
+            .collect();
+        if !children.is_empty() {
+            out.push_str("Sub-items:\n");
+            for child in children {
+                out.push_str(&format!(
+                    "  - [{}] {}\n",
+                    if child.done { "x" } else { " " },
+                    child.text
+                ));
+            }
+        }
+        out
+    }
+
     /// Every todo file, with its workspace-relative path and contents.
     ///
     /// This is what `scan` needs: a proposed change names the file it belongs
@@ -1870,6 +1923,7 @@ impl App {
             &input,
             &self.items_context(),
             &self.files_context(),
+            &self.item_context(),
         );
         let command = self.config.agent.command.clone();
         let schema_flag = self.config.agent.schema_flag.clone();
@@ -1920,9 +1974,13 @@ fn interpret(verb: Verb, json: &str) -> Event {
             Ok(query) => Event::QueryProposed(query),
             Err(err) => fail(verb, err.to_string()),
         },
-        Verb::Summarize => match agent::field(json, "brief") {
+        Verb::Summarize | Verb::Explain => match agent::field(json, "brief") {
             Ok(brief) => Event::TaskFinished {
-                title: "summary".to_string(),
+                title: if verb == Verb::Explain {
+                    "about this item".to_string()
+                } else {
+                    "summary".to_string()
+                },
                 body: brief,
             },
             Err(err) => fail(verb, err.to_string()),
@@ -1964,7 +2022,8 @@ fn help_lines() -> Vec<String> {
         "",
         "agent and sync",
         "  n  natural language to query",
-        "  S  summarise view     b  break down item",
+        "  S  summarise the view · E  explain this item",
+        "  b  break this item into sub-items",
         "  R  scan for changes   s  git sync",
         "",
         "chyron",
@@ -3384,6 +3443,59 @@ mod tests {
                 "R was a dead key for {modifiers:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_item_context_describes_only_the_selected_item() {
+        let (_d, mut app) = disk_app(
+            "## P0 — Critical\n\n### Filing\n\n- [ ] alpha due:2026-08-01\n  > needs the CPA\n  - [ ] a child\n  - [x] a done child\n- [ ] beta\n",
+        );
+        let context = app.item_context();
+
+        assert!(context.contains("Item: alpha"), "the item: {context}");
+        assert!(context.contains("Filing"), "where it lives");
+        assert!(context.contains("needs the CPA"), "its notes");
+        assert!(context.contains("- [ ] a child"), "and its sub-items");
+        assert!(context.contains("- [x] a done child"), "with their state");
+        assert!(!context.contains("beta"), "but not the rest of the list");
+
+        // And it tracks the selection.
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert!(app.item_context().contains("Item: beta"));
+    }
+
+    #[test]
+    fn the_item_context_is_empty_when_nothing_is_selected() {
+        let (_d, app) = disk_app("## P0 — Critical\n");
+        assert!(app.item_context().is_empty());
+    }
+
+    #[test]
+    fn explain_needs_an_item() {
+        let (_d, mut app) = disk_app("## P0 — Critical\n");
+        app.handle_key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::SHIFT));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no item selected"),
+            "got {:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn explain_reports_under_its_own_title() {
+        let (_d, mut app) = disk_app(DOC);
+        app.handle(Message::Event(Event::TaskFinished {
+            title: "about this item".to_string(),
+            body: "it needs the CPA first".to_string(),
+        }));
+        let (title, body) = app.modal.clone().unwrap();
+        assert_eq!(title, "about this item");
+        assert!(body[0].contains("CPA"));
     }
 
     #[test]

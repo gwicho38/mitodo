@@ -40,6 +40,8 @@ pub enum Verb {
     Query,
     /// Summarise the items currently on screen. Read-only.
     Summarize,
+    /// Explain the selected item on its own. Read-only.
+    Explain,
     /// Propose sub-items for one item. Writes, after review.
     Breakdown,
     /// Propose a change-set across the workspace. Writes, after review.
@@ -51,6 +53,7 @@ impl Verb {
         match self {
             Verb::Query => "query",
             Verb::Summarize => "summarize",
+            Verb::Explain => "explain",
             Verb::Breakdown => "breakdown",
             Verb::Scan => "scan",
         }
@@ -67,7 +70,7 @@ impl Verb {
             Verb::Query => {
                 r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}"#
             }
-            Verb::Summarize => {
+            Verb::Summarize | Verb::Explain => {
                 r#"{"type":"object","properties":{"brief":{"type":"string"}},"required":["brief"]}"#
             }
             Verb::Breakdown => {
@@ -92,9 +95,16 @@ impl Verb {
                  must be plain prose written for a person to read — a few sentences or \
                  short dashed lines. Do not put JSON, objects or arrays inside it.\n\n{items}"
             }
+            Verb::Explain => {
+                "Explain this one todo item: what it actually asks for, what is needed to \
+                 finish it, anything it appears to be waiting on, and how urgent it looks. \
+                 Say plainly if the item is too vague to act on.\n\nReply with JSON \
+                 matching the schema. The \"brief\" value must be plain prose written for a \
+                 person to read. Do not put JSON, objects or arrays inside it.\n\n{item}"
+            }
             Verb::Breakdown => {
                 "Break this todo item into concrete next actions. Return between two and \
-                 six short sub-items. Reply with JSON only.\n\nItem: {input}"
+                 six short sub-items. Reply with JSON only.\n\n{item}"
             }
             Verb::Scan => {
                 "You are a todo tracking assistant. Read the todo files below, then:\n\
@@ -114,11 +124,12 @@ impl Verb {
 /// screen. `{files}` is every todo file with its workspace-relative path and
 /// full contents, which is what a change-set needs: a change names the file it
 /// belongs to, so an agent that never saw the paths cannot produce one.
-pub fn render_prompt(template: &str, input: &str, items: &str, files: &str) -> String {
+pub fn render_prompt(template: &str, input: &str, items: &str, files: &str, item: &str) -> String {
     template
         .replace("{input}", input)
         .replace("{items}", items)
         .replace("{files}", files)
+        .replace("{item}", item)
 }
 
 /// Run the configured agent and return its raw stdout.
@@ -344,14 +355,32 @@ mod tests {
 
     #[test]
     fn prompt_templates_substitute_placeholders() {
-        let out = render_prompt("do {input} with {items} and {files}", "X", "Y", "Z");
-        assert_eq!(out, "do X with Y and Z");
+        let out = render_prompt("do {input} with {items} {files} {item}", "X", "Y", "Z", "W");
+        assert_eq!(out, "do X with Y Z W");
     }
 
     #[test]
     fn unused_placeholders_are_left_alone() {
-        let out = render_prompt("only {input}", "X", "Y", "Z");
+        let out = render_prompt("only {input}", "X", "Y", "Z", "W");
         assert_eq!(out, "only X");
+    }
+
+    #[test]
+    fn the_item_verbs_are_sent_the_item_not_the_whole_view() {
+        for verb in [Verb::Explain, Verb::Breakdown] {
+            let prompt = verb.default_prompt();
+            assert!(prompt.contains("{item}"), "{} needs the item", verb.label());
+            assert!(
+                !prompt.contains("{items}"),
+                "{} must not be sent the whole list",
+                verb.label()
+            );
+        }
+    }
+
+    #[test]
+    fn explain_is_read_only() {
+        assert!(!Verb::Explain.writes());
     }
 
     #[test]
