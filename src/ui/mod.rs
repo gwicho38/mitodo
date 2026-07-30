@@ -805,6 +805,50 @@ impl App {
         }
     }
 
+    /// A click inside the new-item dialog.
+    fn click_new_item(&mut self, x: u16, y: u16) {
+        let whole = self.layout.whole;
+        if within(view::new_item_add_rect(whole), x, y) {
+            self.commit_new_item();
+            return;
+        }
+        if within(view::new_item_cancel_rect(whole), x, y) {
+            self.cancel_new_item();
+            return;
+        }
+
+        let layout = view::new_item_layout(whole, &self.new_item);
+
+        // A priority band is picked by clicking it.
+        for (index, rect) in layout.bands.iter().enumerate() {
+            if within(*rect, x, y) {
+                self.new_item.priority = NewItem::BANDS[index];
+                self.new_item.field = NewField::ALL
+                    .iter()
+                    .position(|f| *f == NewField::Priority)
+                    .unwrap_or(1);
+                return;
+            }
+        }
+
+        // Otherwise focus whichever field was clicked, and put the caret where
+        // the click landed so typing continues from there.
+        for (index, rect) in layout.fields.iter().enumerate() {
+            if within(*rect, x, y) {
+                self.new_item.field = index;
+                let content_top = rect.y + 1;
+                if y >= content_top
+                    && let Some(editor) = self.new_item.editor_mut()
+                {
+                    let row = (y - content_top) as usize;
+                    let col = x.saturating_sub(rect.x + 4) as usize;
+                    editor.set_cursor(row, col);
+                }
+                return;
+            }
+        }
+    }
+
     fn cancel_new_item(&mut self) {
         self.mode = Mode::Normal;
         self.new_item = NewItem::default();
@@ -1189,15 +1233,10 @@ impl App {
             return;
         }
 
-        // The new-item dialog takes clicks on its buttons.
+        // The new-item dialog: buttons, fields and priority bands all click.
         if self.mode == Mode::NewItem {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                let whole = self.layout.whole;
-                if within(view::new_item_add_rect(whole), x, y) {
-                    self.commit_new_item();
-                } else if within(view::new_item_cancel_rect(whole), x, y) {
-                    self.cancel_new_item();
-                }
+                self.click_new_item(x, y);
             }
             return;
         }
@@ -3539,6 +3578,97 @@ mod tests {
         type_into(&mut app, "two");
         assert_eq!(app.mode, Mode::NewItem, "still open");
         assert_eq!(app.new_item.notes.text(), "one\ntwo");
+    }
+
+    #[test]
+    fn clicking_a_field_focuses_it() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        with_layout(&mut app);
+
+        let layout = view::new_item_layout(app.layout.whole, &app.new_item);
+        for (index, rect) in layout.fields.iter().enumerate() {
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x + 4,
+                rect.y,
+            ));
+            assert_eq!(
+                app.new_item.field, index,
+                "clicking field {index} focuses it"
+            );
+            with_layout(&mut app);
+        }
+    }
+
+    #[test]
+    fn clicking_a_priority_band_picks_it() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        with_layout(&mut app);
+
+        let layout = view::new_item_layout(app.layout.whole, &app.new_item);
+        for (index, rect) in layout.bands.iter().enumerate() {
+            app.handle_mouse(mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                rect.x + 1,
+                rect.y,
+            ));
+            assert_eq!(
+                app.new_item.priority,
+                NewItem::BANDS[index],
+                "clicking band {index}"
+            );
+            with_layout(&mut app);
+        }
+    }
+
+    #[test]
+    fn the_click_geometry_matches_what_is_drawn() {
+        // The dialog grows as the notes do; a click must still land on the
+        // field it appears to.
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "a title");
+        tab(&mut app);
+        tab(&mut app);
+        type_into(&mut app, "one");
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        type_into(&mut app, "two");
+        with_layout(&mut app);
+
+        let layout = view::new_item_layout(app.layout.whole, &app.new_item);
+        let sub_items = layout.fields[3];
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            sub_items.x + 4,
+            sub_items.y,
+        ));
+        assert_eq!(
+            app.new_item.field, 3,
+            "still reaches sub-items below taller notes"
+        );
+    }
+
+    #[test]
+    fn clicking_into_text_places_the_caret() {
+        let (_d, mut app) = disk_app(SECTIONED);
+        press(&mut app, KeyCode::Char('a'));
+        type_into(&mut app, "hello world");
+        with_layout(&mut app);
+
+        let layout = view::new_item_layout(app.layout.whole, &app.new_item);
+        let title = layout.fields[0];
+        // Content sits one row below the label, indented four columns.
+        app.handle_mouse(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            title.x + 4 + 5,
+            title.y + 1,
+        ));
+        assert_eq!(app.new_item.title.cursor(), (0, 5), "caret where clicked");
+
+        press(&mut app, KeyCode::Char('X'));
+        assert_eq!(app.new_item.title.text(), "helloX world");
     }
 
     #[test]

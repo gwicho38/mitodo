@@ -131,6 +131,12 @@ impl Editor {
         }
     }
 
+    /// Put the caret at a row and column, clamped to the text.
+    pub fn set_cursor(&mut self, row: usize, col: usize) {
+        self.row = row.min(self.lines.len().saturating_sub(1));
+        self.col = col.min(self.line_len(self.row));
+    }
+
     pub fn home(&mut self) {
         self.col = 0;
     }
@@ -244,6 +250,19 @@ mod tests {
         editor.end();
         editor.down();
         assert_eq!(editor.cursor(), (1, 2), "clamped to the shorter line");
+    }
+
+    #[test]
+    fn the_caret_can_be_placed_and_is_clamped() {
+        let mut editor = Editor::new("hello\nab");
+        editor.set_cursor(0, 3);
+        assert_eq!(editor.cursor(), (0, 3));
+
+        editor.set_cursor(1, 99);
+        assert_eq!(editor.cursor(), (1, 2), "clamped to the line");
+
+        editor.set_cursor(99, 0);
+        assert_eq!(editor.cursor(), (1, 0), "clamped to the last line");
     }
 
     #[test]

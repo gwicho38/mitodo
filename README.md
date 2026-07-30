@@ -180,8 +180,12 @@ scrolling works everywhere else.
 ```
 
 `tab` moves between fields, arrows or `0`–`3` pick the priority, `ctrl-s` adds
-and `esc` cancels — and **Add** and **Cancel** are clickable. `enter` submits
-from the title, and makes a new line in the notes and sub-item boxes.
+and `esc` cancels. `enter` submits from the title, and makes a new line in the
+notes and sub-item boxes.
+
+The whole dialog takes the mouse: click a field to focus it and put the caret
+where you clicked, click a priority to pick it, and click **Add** or
+**Cancel**.
 
 The priority decides where the item goes: choosing P1 files it under that
 group's `## P1` heading, after whatever is already there. Notes become the

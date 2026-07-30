@@ -141,6 +141,68 @@ pub fn new_item_rect(area: Rect) -> Rect {
     }
 }
 
+/// Where each part of the new-item dialog sits.
+///
+/// Rendering and hit-testing share this, so a click always lands on what is
+/// actually drawn even as the notes and sub-item boxes grow.
+pub struct NewItemLayout {
+    /// Content rows of each field, in `NewField::ALL` order.
+    pub fields: Vec<Rect>,
+    /// One rect per priority band, in `NewItem::BANDS` order.
+    pub bands: Vec<Rect>,
+}
+
+pub fn new_item_layout(area: Rect, new: &NewItem) -> NewItemLayout {
+    let popup = new_item_rect(area);
+    let left = popup.x + 1;
+    let width = popup.width.saturating_sub(2);
+    let mut y = popup.y + 1;
+
+    let mut fields = Vec::new();
+    let mut bands = Vec::new();
+
+    for field in NewField::ALL {
+        y += 1; // the label row
+        let rows = match field {
+            NewField::Priority => 1u16,
+            NewField::Title => new.title.lines().len() as u16,
+            NewField::Notes => new.notes.lines().len() as u16,
+            NewField::SubItems => new.sub_items.lines().len() as u16,
+        };
+        let rect = Rect {
+            x: left,
+            y,
+            width,
+            height: rows.max(1),
+        };
+        // A click on the label selects the field too.
+        fields.push(Rect {
+            y: rect.y - 1,
+            height: rect.height + 1,
+            ..rect
+        });
+
+        if field == NewField::Priority {
+            let mut x = left + 4;
+            for band in NewItem::BANDS {
+                let label = band.map_or("none".to_string(), |p| p.as_str().to_string());
+                let width = label.chars().count() as u16 + 4;
+                bands.push(Rect {
+                    x,
+                    y,
+                    width,
+                    height: 1,
+                });
+                x += width;
+            }
+        }
+
+        y += rect.height + 1; // content plus the blank line after it
+    }
+
+    NewItemLayout { fields, bands }
+}
+
 /// The Add button of the new-item dialog.
 pub fn new_item_add_rect(area: Rect) -> Rect {
     let popup = new_item_rect(area);
@@ -1246,6 +1308,57 @@ mod tests {
         app.workspace.items[0].description = "needs CPA sign-off".to_string();
         let rows = draw_app(&app, 80, 24).join("\n");
         assert!(rows.contains("needs CPA sign-off"));
+    }
+
+    #[test]
+    fn the_dialog_layout_matches_what_is_rendered() {
+        // Hit-testing uses new_item_layout; drawing walks its own rows. If the
+        // two drift, clicks land on the wrong field.
+        use super::super::{Mode, NewField};
+        let mut app = test_app();
+        app.mode = Mode::NewItem;
+        app.new_item.title = crate::ui::edit::Editor::new("a title");
+        app.new_item.notes = crate::ui::edit::Editor::new("one\ntwo");
+
+        let rows = draw_adopting(&mut app, 100, 30);
+        let layout = new_item_layout(app.layout.whole, &app.new_item);
+
+        for (index, field) in NewField::ALL.iter().enumerate() {
+            let rect = layout.fields[index];
+            let drawn = &rows[rect.y as usize];
+            assert!(
+                drawn.contains(field.label()),
+                "field {index} ({}) should be drawn at row {}, found {drawn:?}",
+                field.label(),
+                rect.y
+            );
+        }
+    }
+
+    #[test]
+    fn the_priority_bands_are_drawn_where_they_are_clickable() {
+        use super::super::{Mode, NewItem};
+        let mut app = test_app();
+        app.mode = Mode::NewItem;
+
+        let rows = draw_adopting(&mut app, 100, 30);
+        let layout = new_item_layout(app.layout.whole, &app.new_item);
+
+        for (index, band) in NewItem::BANDS.iter().enumerate() {
+            let rect = layout.bands[index];
+            let label = band.map_or("none".to_string(), |p| p.as_str().to_string());
+            let drawn: String = rows[rect.y as usize]
+                .chars()
+                .skip(rect.x as usize)
+                .take(rect.width as usize)
+                .collect();
+            assert!(
+                drawn.contains(&label),
+                "band {label} should be at x={} y={}, found {drawn:?}",
+                rect.x,
+                rect.y
+            );
+        }
     }
 
     #[test]
