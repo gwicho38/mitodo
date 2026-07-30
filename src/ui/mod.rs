@@ -1,4 +1,5 @@
 pub mod chyron;
+pub mod edit;
 mod view;
 pub mod wrap;
 
@@ -21,6 +22,7 @@ use crate::store::Workspace;
 use crate::store::model::{Group, Item, ItemId};
 use crate::store::{self, WriteError};
 use chyron::TickerState;
+use edit::Editor;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -118,6 +120,8 @@ pub enum Mode {
     AskingAgent(Verb),
     /// The view-settings menu is open.
     ViewMenu,
+    /// Editing the notes inside the detail pane.
+    EditingDetail,
 }
 
 /// A toggle in the view menu.
@@ -150,7 +154,6 @@ pub enum EditKind {
     AddSibling,
     AddChild,
     EditText,
-    Description,
 }
 
 impl EditKind {
@@ -159,7 +162,6 @@ impl EditKind {
             EditKind::AddSibling => "new item",
             EditKind::AddChild => "new sub-item",
             EditKind::EditText => "edit",
-            EditKind::Description => "description",
         }
     }
 }
@@ -206,6 +208,8 @@ pub struct App {
     pub collapsed: std::collections::HashSet<ItemId>,
     /// First visible line of the detail pane.
     pub detail_scroll: usize,
+    /// Notes being edited in the detail pane.
+    pub editor: Editor,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
@@ -265,6 +269,7 @@ impl App {
             wrap: config_wrap,
             collapsed: std::collections::HashSet::new(),
             detail_scroll: 0,
+            editor: Editor::default(),
             view_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
@@ -582,7 +587,66 @@ impl App {
             Mode::ReviewingChangeSet => self.handle_review_key(key),
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
+            Mode::EditingDetail => self.handle_detail_key(key),
         }
+    }
+
+    /// Start editing the selected item's notes, in the detail pane.
+    pub fn begin_detail_edit(&mut self) {
+        let Some(item) = self.selected_item() else {
+            self.notice = Some("no item selected".to_string());
+            return;
+        };
+        self.editor = Editor::new(&item.description);
+        self.detail_scroll = 0;
+        self.focus = Focus::Detail;
+        self.mode = Mode::EditingDetail;
+    }
+
+    /// Keys while typing notes in place. Enter makes a new line, so saving
+    /// needs its own chord.
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                K::Char('s') => self.commit_detail_edit(),
+                K::Char('c') => {
+                    self.mode = Mode::Normal;
+                    self.notice = Some("notes discarded".to_string());
+                }
+                _ => {}
+            }
+            return;
+        }
+        match key.code {
+            K::Esc => {
+                self.mode = Mode::Normal;
+                self.notice = Some("notes discarded".to_string());
+            }
+            K::Enter => self.editor.newline(),
+            K::Backspace => self.editor.backspace(),
+            K::Delete => self.editor.delete(),
+            K::Left => self.editor.left(),
+            K::Right => self.editor.right(),
+            K::Up => self.editor.up(),
+            K::Down => self.editor.down(),
+            K::Home => self.editor.home(),
+            K::End => self.editor.end(),
+            K::Tab => self.editor.insert(' '),
+            K::Char(c) => self.editor.insert(c),
+            _ => {}
+        }
+    }
+
+    fn commit_detail_edit(&mut self) {
+        self.mode = Mode::Normal;
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let (file, line, raw) = (item.file.clone(), item.line, item.raw.clone());
+        let text = self.editor.text();
+        let result = store::set_description(&file, line, &raw, &text);
+        self.after_write(result, "notes");
     }
 
     /// Whether a view setting is currently on.
@@ -864,7 +928,7 @@ impl App {
             (K::Char('a'), KeyModifiers::NONE) => self.begin_edit(EditKind::AddSibling, false),
             (K::Char('A'), _) => self.begin_edit(EditKind::AddChild, false),
             (K::Char('e'), KeyModifiers::NONE) => self.begin_edit(EditKind::EditText, true),
-            (K::Char('i'), KeyModifiers::NONE) => self.begin_edit(EditKind::Description, true),
+            (K::Char('i'), KeyModifiers::NONE) => self.begin_detail_edit(),
             (K::Char('s'), KeyModifiers::NONE) => self.spawn_git_sync(),
             (K::Char('c'), KeyModifiers::NONE) => self.toggle_ticker(),
             (K::Char('z'), KeyModifiers::NONE) => self.toggle_fold(),
@@ -1097,8 +1161,8 @@ impl App {
                 self.toggle_fold();
             }
         } else if within(self.layout.detail, x, y) {
-            // The detail pane shows the notes; clicking it edits them.
-            self.begin_edit(EditKind::Description, true);
+            // The detail pane shows the notes; clicking it edits them there.
+            self.begin_detail_edit();
         }
     }
 
@@ -1170,12 +1234,8 @@ impl App {
             self.notice = Some("no item selected".to_string());
             return;
         };
-        self.edit_buffer = if seed_from_item {
-            match kind {
-                EditKind::EditText => item.text.clone(),
-                EditKind::Description => item.description.clone(),
-                _ => String::new(),
-            }
+        self.edit_buffer = if seed_from_item && kind == EditKind::EditText {
+            item.text.clone()
         } else {
             String::new()
         };
@@ -1196,7 +1256,6 @@ impl App {
             EditKind::AddSibling => store::add_item(&file, line, &raw, indent, &text),
             EditKind::AddChild => store::add_item(&file, line, &raw, indent + 2, &text),
             EditKind::EditText => store::edit_text(&file, line, &raw, &text),
-            EditKind::Description => store::set_description(&file, line, &raw, &text),
         };
 
         self.mode = Mode::Normal;
@@ -1536,7 +1595,8 @@ fn help_lines() -> Vec<String> {
         "",
         "items",
         "  space/x  toggle done  a/A  add sibling/child",
-        "  e  edit text          i  edit description",
+        "  e  edit text          i  edit notes in the detail pane",
+        "     while editing notes: ctrl-s saves · esc discards",
         "  z  fold / unfold       Z  fold / unfold all",
         "  d  delete             H  hide done",
         "",
@@ -2003,16 +2063,82 @@ mod tests {
         );
     }
 
+    /// Type into the in-pane notes editor and save with ctrl-s.
+    fn type_notes(app: &mut App, text: &str) {
+        for c in text.chars() {
+            if c == '\n' {
+                app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            } else {
+                press(app, KeyCode::Char(c));
+            }
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    }
+
     #[test]
-    fn i_sets_the_description() {
+    fn i_edits_the_notes_in_the_detail_pane() {
         let (_d, mut app) = disk_app(DOC);
         press(&mut app, KeyCode::Char('i'));
-        type_text(&mut app, "needs CPA sign-off");
+        assert_eq!(app.mode, Mode::EditingDetail, "edited where they are shown");
+        assert_eq!(app.focus, Focus::Detail);
+
+        type_notes(&mut app, "needs CPA sign-off");
         assert_eq!(
             read(&app),
             "## P0 — Critical\n\n- [ ] alpha\n  > needs CPA sign-off\n- [x] beta\n"
         );
         assert_eq!(app.workspace.items[0].description, "needs CPA sign-off");
+    }
+
+    #[test]
+    fn notes_can_run_to_several_lines() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('i'));
+        type_notes(&mut app, "due Friday\nask Sam first");
+        assert_eq!(
+            read(&app),
+            "## P0 — Critical\n\n- [ ] alpha\n  > due Friday\n  > ask Sam first\n- [x] beta\n"
+        );
+    }
+
+    #[test]
+    fn editing_notes_starts_from_what_is_already_there() {
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] alpha\n  > existing note\n");
+        press(&mut app, KeyCode::Char('i'));
+        assert_eq!(app.editor.text(), "existing note", "seeded");
+        type_notes(&mut app, ", amended");
+        assert!(read(&app).contains("> existing note, amended"));
+    }
+
+    #[test]
+    fn esc_discards_the_notes_without_writing() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('i'));
+        press(&mut app, KeyCode::Char('x'));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(read(&app), DOC, "file untouched");
+    }
+
+    #[test]
+    fn normal_keys_are_text_while_editing_notes() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('i'));
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('d'));
+        assert!(!app.should_quit, "q is text here");
+        assert_eq!(app.editor.text(), "qd");
+    }
+
+    #[test]
+    fn clearing_the_notes_removes_the_block() {
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] alpha\n  > existing note\n");
+        press(&mut app, KeyCode::Char('i'));
+        for _ in 0..40 {
+            app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert_eq!(read(&app), "## P0\n\n- [ ] alpha\n");
     }
 
     #[test]
@@ -3243,7 +3369,11 @@ mod tests {
             detail.x + 4,
             detail.y + 2,
         ));
-        assert_eq!(app.mode, Mode::Editing(EditKind::Description));
+        assert_eq!(
+            app.mode,
+            Mode::EditingDetail,
+            "edited in the pane, not below it"
+        );
     }
 
     #[test]

@@ -132,7 +132,7 @@ Arrows work the list and the tree; `hjkl` moves between panes.
 | `↑` `↓` | move / scroll | `space` `x` | toggle done |
 | `→` | open a node, then step into it | `a` `A` | add sibling / child |
 | `←` | close a node, then step out to its parent | `e` | edit text |
-| `g` `G` | first / last | `i` | edit description |
+| `g` `G` | first / last | `i` | edit notes in the pane |
 | `h` `j` `k` `l` | move between panes | `d` | delete (asks first) |
 | `z` `Z` | fold / fold all | `H` | hide done |
 | `/` `esc` | edit / clear query | `s` | git sync |

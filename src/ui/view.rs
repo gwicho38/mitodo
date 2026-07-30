@@ -686,7 +686,57 @@ pub fn clamp_scroll(scroll: usize, len: usize, height: usize) -> usize {
     scroll.min(len - height)
 }
 
+/// The notes editor, drawn inside the detail pane with a real caret.
+fn render_detail_editor(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    let width = area.width.saturating_sub(2) as usize;
+    let (row, col) = app.editor.cursor();
+
+    // Wrap each logical line, remembering where the caret lands so the
+    // terminal cursor can be put on the right wrapped row.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut caret: (u16, u16) = (0, 0);
+    for (index, logical) in app.editor.lines().iter().enumerate() {
+        let segments = if logical.is_empty() {
+            vec![String::new()]
+        } else {
+            wrap_text(logical, width.max(1))
+        };
+        let mut consumed = 0usize;
+        for (n, segment) in segments.iter().enumerate() {
+            if index == row {
+                let len = segment.chars().count();
+                let last = n + 1 == segments.len();
+                if col >= consumed && (col <= consumed + len || last) {
+                    caret = ((col - consumed).min(len) as u16, lines.len() as u16);
+                }
+                // Wrapping drops the space the words were split on.
+                consumed += len + 1;
+            }
+            lines.push(Line::from(Span::styled(
+                segment.clone(),
+                theme.command_input(),
+            )));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title("notes — ctrl-s saves · esc discards"),
+        ),
+        area,
+    );
+    frame.set_cursor_position((area.x + 1 + caret.0, area.y + 1 + caret.1));
+}
+
 fn render_detail(app: &App, frame: &mut Frame, area: Rect) {
+    if app.mode == Mode::EditingDetail {
+        render_detail_editor(app, frame, area);
+        return;
+    }
     let theme = &app.theme;
     let focused = app.focus == Focus::Detail;
     let lines: Vec<Line> = match app.selected_item() {
@@ -809,6 +859,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         (None, None, Mode::ReviewingChangeSet) => Line::from(Span::styled(
             " apply this change-set? y / n ".to_string(),
             theme.tooltip_warning(),
+        )),
+        (None, None, Mode::EditingDetail) => Line::from(Span::styled(
+            " editing notes · ctrl-s saves · esc discards ".to_string(),
+            theme.command_input(),
         )),
         (None, None, Mode::ViewMenu) => Line::from(Span::styled(
             " j/k move · space toggle · esc close ".to_string(),
