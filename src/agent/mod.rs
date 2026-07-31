@@ -42,6 +42,9 @@ pub enum Verb {
     Summarize,
     /// Explain the selected item on its own. Read-only.
     Explain,
+    /// Carry out an instruction against one item, with whatever tools the
+    /// agent has. Reports what it did and offers to mark the item done.
+    Act,
     /// Propose sub-items for one item. Writes, after review.
     Breakdown,
     /// Propose a change-set across the workspace. Writes, after review.
@@ -54,6 +57,7 @@ impl Verb {
             Verb::Query => "query",
             Verb::Summarize => "summarize",
             Verb::Explain => "explain",
+            Verb::Act => "act",
             Verb::Breakdown => "breakdown",
             Verb::Scan => "scan",
         }
@@ -72,6 +76,9 @@ impl Verb {
             }
             Verb::Summarize | Verb::Explain => {
                 r#"{"type":"object","properties":{"brief":{"type":"string"}},"required":["brief"]}"#
+            }
+            Verb::Act => {
+                r#"{"type":"object","properties":{"report":{"type":"string"},"done":{"type":"boolean"}},"required":["report"]}"#
             }
             Verb::Breakdown => {
                 r#"{"type":"object","properties":{"sub_items":{"type":"array","items":{"type":"string"}}},"required":["sub_items"]}"#
@@ -101,6 +108,14 @@ impl Verb {
                  Say plainly if the item is too vague to act on.\n\nReply with JSON \
                  matching the schema. The \"brief\" value must be plain prose written for a \
                  person to read. Do not put JSON, objects or arrays inside it.\n\n{item}"
+            }
+            Verb::Act => {
+                "Carry out the request below against this todo item, using whatever tools \
+                 you have. Do the work; do not just describe it.\n\nReply with JSON \
+                 matching the schema. \"report\" is plain prose saying what you actually \
+                 did — not what you intend to do — and must not contain JSON. Set \"done\" \
+                 to true only if the item is now genuinely finished.\n\n{item}\n\nRequest: \
+                 {input}"
             }
             Verb::Breakdown => {
                 "Break this todo item into concrete next actions. Return between two and \
@@ -309,6 +324,11 @@ pub fn field(json: &str, name: &str) -> Result<String, AgentError> {
     Ok(humanise(&value, 0).join("\n"))
 }
 
+/// Read a boolean out of an agent's reply, if it said one either way.
+pub fn flag(json: &str, name: &str) -> Option<bool> {
+    extract_json(json)?.get(name)?.as_bool()
+}
+
 /// Pull an array-of-strings field out of an agent's JSON reply.
 pub fn string_list(json: &str, name: &str) -> Result<Vec<String>, AgentError> {
     let value = extract_json(json).ok_or_else(|| AgentError::BadJson("not JSON".to_string()))?;
@@ -381,6 +401,43 @@ mod tests {
     #[test]
     fn explain_is_read_only() {
         assert!(!Verb::Explain.writes());
+    }
+
+    #[test]
+    fn act_is_sent_both_the_item_and_the_instruction() {
+        let prompt = Verb::Act.default_prompt();
+        assert!(prompt.contains("{item}"), "which item");
+        assert!(prompt.contains("{input}"), "and what to do with it");
+        assert!(
+            prompt.contains("do not just describe"),
+            "it is meant to act"
+        );
+    }
+
+    #[test]
+    fn the_act_schema_carries_a_report_and_a_done_flag() {
+        let schema: serde_json::Value = serde_json::from_str(Verb::Act.schema()).unwrap();
+        let props = schema.get("properties").unwrap();
+        assert!(props.get("report").is_some());
+        assert!(props.get("done").is_some());
+    }
+
+    #[test]
+    fn a_boolean_field_is_read_from_a_reply() {
+        assert_eq!(
+            flag(r#"{"report":"did it","done":true}"#, "done"),
+            Some(true)
+        );
+        assert_eq!(
+            flag(r#"{"report":"tried","done":false}"#, "done"),
+            Some(false)
+        );
+        assert_eq!(
+            flag(r#"{"report":"tried"}"#, "done"),
+            None,
+            "absent is unknown"
+        );
+        assert_eq!(flag("not json", "done"), None);
     }
 
     #[test]

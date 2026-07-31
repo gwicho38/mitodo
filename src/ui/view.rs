@@ -530,7 +530,7 @@ fn render_overlay(app: &App, frame: &mut Frame, area: Rect) -> usize {
     let Some((title, body)) = &app.modal else {
         return 0;
     };
-    if app.mode != Mode::Modal {
+    if !matches!(app.mode, Mode::Modal | Mode::ActReport) {
         return 0;
     }
 
@@ -1124,6 +1124,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         )),
         (None, None, Mode::ConfirmingDelete) => Line::from(Span::styled(
             " delete this item? y / n ".to_string(),
+            theme.tooltip_warning(),
+        )),
+        (None, None, Mode::ActReport) => Line::from(Span::styled(
+            " mark this item done? y / n · any other key dismisses ".to_string(),
             theme.tooltip_warning(),
         )),
         (None, None, Mode::ConfirmingArchive) => Line::from(Span::styled(

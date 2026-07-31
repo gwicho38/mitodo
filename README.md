@@ -292,6 +292,7 @@ scan = "~/.config/mitodo/prompts/scan.md"   # your own prompt, kept local
 | `n` | describe a filter in words; it builds the query and shows you what it built | no |
 | `S` | summarise what's on screen | no |
 | `E` | explain the selected item on its own | no |
+| `!` | carry out an instruction against the selected item | asks after |
 | `b` | break the selected item into sub-items | after review |
 | `R` | scan for changes across the workspace | after review |
 
@@ -299,12 +300,18 @@ Prompt templates get three placeholders: `{items}` is the view as rendered,
 `{item}` is just the selected item — its notes, deadline and sub-items — and
 `{files}` is every todo file with its workspace-relative path and contents.
 `scan` needs `{files}` — a proposed change names the file it belongs to, so an
-agent that never saw the paths cannot produce a usable one. `E` and `b` use
-`{item}`, so they answer about one thing rather than the whole list. `{input}`
+agent that never saw the paths cannot produce a usable one. `E`, `b` and `!`
+use `{item}`, so they work on one thing rather than the whole list. `{input}`
 is whatever you typed.
 
-Both writing verbs go through the same review list, so `b` proposes sub-items
+Both proposing verbs go through the same review list, so `b` proposes sub-items
 you pick from and the accepted ones are added as children of the item.
+
+`!` is different: you type an instruction — *reply to David and attach the
+signed exhibit* — and the agent carries it out with whatever tools it has,
+against the selected item. It reports what it actually did and then asks
+whether to tick the item off. Its own view of whether the work is finished is
+only a suggestion; nothing is marked done until you say so.
 
 Read-only answers open in a panel that scrolls when the text is longer than
 fits — `↑`/`↓` a line, `space` a page, any other key dismisses.

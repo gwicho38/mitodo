@@ -152,6 +152,8 @@ pub enum Mode {
     ConfirmingDelete,
     /// Waiting for y/n before archiving finished items.
     ConfirmingArchive,
+    /// Showing what an agent did, and asking whether to mark the item done.
+    ActReport,
     /// Showing scrollable output; any key dismisses.
     Modal,
     /// Showing a proposed change-set; y applies, anything else discards.
@@ -329,6 +331,8 @@ pub struct App {
     modal_rows: usize,
     /// Proposals awaiting review.
     pub pending: Option<Pending>,
+    /// The item an agent acted on, awaiting the mark-done question.
+    pub acted_on: Option<ItemId>,
     /// Which proposed changes are picked, and where the cursor is in the list.
     pub review_selected: Vec<bool>,
     pub review_cursor: usize,
@@ -400,6 +404,7 @@ impl App {
             modal_scroll: 0,
             modal_rows: 0,
             pending: None,
+            acted_on: None,
             review_selected: Vec::new(),
             review_cursor: 0,
             review_scroll: 0,
@@ -683,6 +688,20 @@ impl App {
                 self.busy = None;
                 self.begin_review(Pending::Changes(set));
             }
+            Message::Event(Event::ActFinished { report, done }) => {
+                self.busy = None;
+                self.acted_on = self.selected_item().map(|i| i.id.clone());
+                let mut body: Vec<String> = report.lines().map(|l| l.to_string()).collect();
+                body.push(String::new());
+                body.push(if done {
+                    "the agent believes this is finished — mark it done? y / n".to_string()
+                } else {
+                    "mark this item done anyway? y / n".to_string()
+                });
+                self.open_modal("what the agent did", body);
+                // Its own mode, so a stray key does not silently tick an item.
+                self.mode = Mode::ActReport;
+            }
             Message::Event(Event::SubItemsProposed(lines)) => {
                 self.busy = None;
                 match self.selected_item().map(|i| i.id.clone()) {
@@ -716,6 +735,16 @@ impl App {
             Mode::EditingQuery => self.handle_query_key(key),
             Mode::Editing(kind) => self.handle_edit_key(key, kind),
             Mode::ConfirmingDelete => self.handle_confirm_key(key),
+            Mode::ActReport => {
+                // Any key dismisses; y also ticks the item off.
+                let mark = matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'));
+                self.mode = Mode::Normal;
+                self.modal = None;
+                let id = self.acted_on.take();
+                if mark && let Some(id) = id {
+                    self.mark_done(&id);
+                }
+            }
             Mode::ConfirmingArchive => {
                 self.mode = Mode::Normal;
                 if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
@@ -1117,6 +1146,20 @@ impl App {
         self.open_modal("apply", body);
     }
 
+    /// Tick an item off by id, through the conflict-aware writer.
+    fn mark_done(&mut self, id: &ItemId) {
+        let Some(item) = self.workspace.items.iter().find(|i| &i.id == id) else {
+            self.notice = Some("the item is no longer there".to_string());
+            return;
+        };
+        if item.done {
+            return;
+        }
+        let (file, line, raw) = (item.file.clone(), item.line, item.raw.clone());
+        let result = store::toggle(&file, line, &raw, true);
+        self.after_write(result, "mark done");
+    }
+
     /// Add the picked lines as children of `parent`, last first so earlier
     /// insertions do not move the anchor line.
     fn apply_sub_items(&mut self, parent: &ItemId, lines: &[String]) -> (usize, Vec<String>) {
@@ -1283,6 +1326,10 @@ impl App {
             (K::Char('N'), _) => self.show_notes(),
             (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
+            // `!` rather than a ctrl chord: ctrl-a is the tmux prefix for many
+            // people and would never reach us. It also matches vim's "filter
+            // through an external command", which is what this does.
+            (K::Char('!'), _) => self.begin_ask(Verb::Act),
             (K::Char('S'), _) => self.spawn_agent(Verb::Summarize, String::new()),
             (K::Char('E'), _) => {
                 if self.selected_item().is_some() {
@@ -1993,6 +2040,15 @@ fn interpret(verb: Verb, json: &str) -> Event {
             Ok(set) => Event::ChangeSetProposed(set),
             Err(err) => fail(verb, err.to_string()),
         },
+        Verb::Act => match agent::field(json, "report") {
+            Ok(report) => Event::ActFinished {
+                report,
+                // The agent's own view of whether the work is finished; the
+                // user is asked before anything is ticked off.
+                done: agent::flag(json, "done").unwrap_or(false),
+            },
+            Err(err) => fail(verb, err.to_string()),
+        },
     }
 }
 
@@ -2024,6 +2080,7 @@ fn help_lines() -> Vec<String> {
         "  n  natural language to query",
         "  S  summarise the view · E  explain this item",
         "  b  break this item into sub-items",
+        "  !  ask an agent to act on this item",
         "  R  scan for changes   s  git sync",
         "",
         "chyron",
@@ -3443,6 +3500,119 @@ mod tests {
                 "R was a dead key for {modifiers:?}"
             );
         }
+    }
+
+    // --- act ---
+
+    fn acted(app: &mut App, report: &str, done: bool) {
+        app.handle(Message::Event(Event::ActFinished {
+            report: report.to_string(),
+            done,
+        }));
+    }
+
+    #[test]
+    fn bang_asks_what_to_do_before_running_anything() {
+        let (_d, mut app) = disk_app(DOC);
+        press(&mut app, KeyCode::Char('!'));
+        // No agent configured here, so it says so rather than doing nothing.
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no agent"),
+            "got {:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn an_act_report_asks_before_ticking_anything_off() {
+        let (_d, mut app) = disk_app(DOC);
+        acted(&mut app, "replied to the thread", true);
+
+        assert_eq!(app.mode, Mode::ActReport);
+        let (title, body) = app.modal.clone().unwrap();
+        assert_eq!(title, "what the agent did");
+        assert!(body[0].contains("replied to the thread"));
+        assert!(body.last().unwrap().contains("y / n"));
+        assert_eq!(read(&app), DOC, "nothing written until you answer");
+    }
+
+    #[test]
+    fn y_marks_the_item_done() {
+        let (_d, mut app) = disk_app(DOC);
+        acted(&mut app, "did the thing", true);
+        press(&mut app, KeyCode::Char('y'));
+
+        assert_eq!(read(&app), "## P0 — Critical\n\n- [x] alpha\n- [x] beta\n");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn any_other_key_leaves_the_item_open() {
+        let (_d, mut app) = disk_app(DOC);
+        acted(&mut app, "made a start", false);
+        press(&mut app, KeyCode::Char('n'));
+
+        assert_eq!(read(&app), DOC, "the report is not an instruction to tick");
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn the_agents_own_verdict_is_only_a_suggestion() {
+        // done: true still asks; done: false still offers.
+        let (_d, mut app) = disk_app(DOC);
+        acted(&mut app, "finished it", true);
+        assert!(
+            app.modal
+                .clone()
+                .unwrap()
+                .1
+                .last()
+                .unwrap()
+                .contains("believes")
+        );
+
+        let (_d2, mut app2) = disk_app(DOC);
+        acted(&mut app2, "partly done", false);
+        assert!(
+            app2.modal
+                .clone()
+                .unwrap()
+                .1
+                .last()
+                .unwrap()
+                .contains("anyway")
+        );
+    }
+
+    #[test]
+    fn acting_ticks_the_item_that_was_acted_on() {
+        // The cursor may move while the agent runs; the id is what counts.
+        let (_d, mut app) = disk_app("## P0\n\n- [ ] first\n- [ ] second\n");
+        acted(&mut app, "did it", true);
+        app.acted_on = Some(app.workspace.items[1].id.clone());
+        press(&mut app, KeyCode::Char('y'));
+
+        assert_eq!(read(&app), "## P0\n\n- [ ] first\n- [x] second\n");
+    }
+
+    #[test]
+    fn an_item_that_vanished_is_reported_not_panicked() {
+        let (_d, mut app) = disk_app(DOC);
+        acted(&mut app, "did it", true);
+        app.acted_on = Some(ItemId::compute("gone", "gone", "gone", 0, "gone"));
+        press(&mut app, KeyCode::Char('y'));
+
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no longer there"),
+            "got {:?}",
+            app.notice
+        );
     }
 
     #[test]
