@@ -78,7 +78,8 @@ Swap the query field vocabulary (`feed:` → `acct:`, `unread` → `!done`,
 `date:` → `due:`) and retarget the filter predicate at `Item`. Wire `/` and `:`.
 
 **Deliverable:** `pri:P0 acct:lefv !done` filters the list — this is what
-retires `mcli todos act`.
+replaces `mcli todos act`'s filtering. The rest of `act` — its per-item agent
+loop — is a phase 3 verb, not something the query language covers.
 
 ### Stage D — mutate
 

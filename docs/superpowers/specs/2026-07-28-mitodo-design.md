@@ -51,7 +51,7 @@ the tool this replaces:
 | `h` hide done | `h`, and the query `!done` |
 | `s` git sync | `s` |
 | settings persistence (theme, hide-done) | config file |
-| `act` — resolve loop with `-p` / `-a` filters | subsumed by the query language |
+| `act` — resolve loop with `-p` / `-a` filters | its **filtering** becomes the query language; its per-item agent loop is a separate verb |
 | `scan` — LLM proposes a change-set | generic agent subsystem |
 | `--root`, `--priority`, `--account` | CLI flags plus query |
 
@@ -316,9 +316,14 @@ sort:pri,text          ordering
 AND  OR  NOT  ( )      combinators, inherited unchanged
 ```
 
-This is what retires `mcli todos act`: its `-p P0 -a lefv` filters become
-`pri:P0 acct:lefv !done`, and its interactive resolve loop becomes that view
-plus the toggle key.
+This replaces `mcli todos act`'s **filtering**: its `-p P0 -a lefv` becomes
+`pri:P0 acct:lefv !done`.
+
+It does not replace the rest of `act`. That command is a per-item agent loop —
+it shows an item, takes a free-text instruction, runs an agent with tools, and
+offers to tick the item off. A query finds items; it does not act on them. That
+loop is a verb of the agent subsystem, not a feature of the query language, and
+an earlier draft of this document was wrong to say otherwise.
 
 ---
 
