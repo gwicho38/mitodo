@@ -400,7 +400,7 @@ pub fn review_first_row(area: Rect) -> u16 {
 fn review_row(app: &App, pending: &super::Pending, index: usize) -> String {
     let mut text = pending.row(index);
     if let super::Pending::Changes(set) = pending {
-        let open = set.open_sub_items(index, &app.workspace.items);
+        let open = set.open_sub_items(index, &app.workspace.root, &app.workspace.items);
         if open > 0 {
             text.push_str(&format!("  ({open} open sub-items)"));
         }

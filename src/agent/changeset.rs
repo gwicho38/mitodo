@@ -83,24 +83,25 @@ impl ChangeSet {
             .unwrap_or_default()
     }
 
-    /// How many unfinished sub-items an archive change would carry out of the
-    /// working file. Zero for every other action.
-    pub fn open_sub_items(&self, index: usize, items: &[Item]) -> usize {
+    /// How many unfinished items an archive change would carry out of the
+    /// working file, anywhere in the subtree. Zero for every other action.
+    ///
+    /// Resolves the change through `find`, exactly as `apply` does, so the row
+    /// always describes the item that would actually be archived.
+    pub fn open_sub_items(&self, index: usize, root: &Path, items: &[Item]) -> usize {
         let Some(change) = self.changes.get(index) else {
             return 0;
         };
         if change.action != ChangeAction::Archive {
             return 0;
         }
-        let Some(parent) = items
-            .iter()
-            .find(|i| i.text.trim().eq_ignore_ascii_case(change.content.trim()))
-        else {
+        let path = root.join(&change.file);
+        let Some(target) = find(items, &path, &change.content) else {
             return 0;
         };
-        items
-            .iter()
-            .filter(|i| i.parent.as_ref() == Some(&parent.id) && !i.done)
+        descendants(items, target)
+            .into_iter()
+            .filter(|i| !i.done)
             .count()
     }
 
@@ -157,6 +158,22 @@ pub fn apply(
         }
     }
     report
+}
+
+/// Everything below `root_item`, at any depth.
+///
+/// Archiving moves the whole subtree, so a count of what travels with an item
+/// cannot stop at its direct children.
+fn descendants<'a>(items: &'a [Item], root_item: &Item) -> Vec<&'a Item> {
+    let mut found = Vec::new();
+    let mut frontier = vec![root_item.id.clone()];
+    while let Some(parent) = frontier.pop() {
+        for child in items.iter().filter(|i| i.parent.as_ref() == Some(&parent)) {
+            frontier.push(child.id.clone());
+            found.push(child);
+        }
+    }
+    found
 }
 
 /// The item in `path` whose text best matches `needle`.
@@ -349,18 +366,89 @@ mod tests {
     #[test]
     fn an_archive_row_reports_how_much_open_work_it_carries() {
         let body = "## P0\n\n- [ ] parent\n  - [ ] one\n  - [x] two\n";
-        let (_dir, _path, items) = workspace(body);
+        let (dir, _path, items) = workspace(body);
         let changes = set(r#"{"summary":"s","changes":[
             {"file":"lefv.md","action":"archive","content":"parent","reason":"r"}]}"#);
-        assert_eq!(changes.open_sub_items(0, &items), 1);
+        assert_eq!(changes.open_sub_items(0, dir.path(), &items), 1);
+    }
+
+    // Archiving takes the whole subtree, so anything deeper counts too.
+    #[test]
+    fn open_sub_items_counts_the_whole_subtree_not_just_direct_children() {
+        let body =
+            "## P0\n\n- [ ] parent\n  - [ ] child\n    - [ ] grandchild\n    - [x] done one\n";
+        let (dir, _path, items) = workspace(body);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"parent","reason":"r"}]}"#);
+        assert_eq!(changes.open_sub_items(0, dir.path(), &items), 2);
+    }
+
+    // Two groups can hold the same title; the count must come from the file the
+    // change names, or it describes an item that is not being archived.
+    #[test]
+    fn open_sub_items_counts_within_the_file_the_change_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut items = Vec::new();
+        // other.md first: a search that ignores the named file finds this copy,
+        // and reports its two sub-items against lefv.md's childless one.
+        for (name, body) in [
+            (
+                "other.md",
+                "## P0\n\n- [ ] Review contract\n  - [ ] one\n  - [ ] two\n",
+            ),
+            ("lefv.md", "## P0\n\n- [ ] Review contract\n"),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            items.extend(parse_todo_file(
+                &path,
+                name,
+                body,
+                &PriorityConfig::default(),
+                &DueConfig::default(),
+            ));
+        }
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"Review contract","reason":"r"}]}"#);
+        assert_eq!(
+            changes.open_sub_items(0, dir.path(), &items),
+            0,
+            "lefv.md's copy has no sub-items; other.md's two must not be counted"
+        );
+    }
+
+    // The row must describe the item `apply` would archive, so both resolve the
+    // change the same way — an exact-equality count would report zero here.
+    #[test]
+    fn open_sub_items_resolves_the_change_the_way_apply_does() {
+        let body = "## P0\n\n- [ ] File the 83(b) election\n  - [ ] pull the signature page\n";
+        let (dir, path, items) = workspace(body);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"the 83(b) election","reason":"r"}]}"#);
+
+        assert_eq!(
+            changes.open_sub_items(0, dir.path(), &items),
+            1,
+            "a partial title still resolves, as it does in apply"
+        );
+
+        let archive = dir.path().join("_archive");
+        let report = apply(
+            dir.path(),
+            &archive_map(&path, &archive),
+            "2026-08-11",
+            &items,
+            &changes,
+        );
+        assert_eq!(report.applied, 1, "and apply archives that same item");
     }
 
     #[test]
     fn a_non_archive_row_carries_no_open_sub_item_count() {
-        let (_dir, _path, items) = workspace(DOC);
+        let (dir, _path, items) = workspace(DOC);
         let changes = set(r#"{"summary":"s","changes":[
             {"file":"lefv.md","action":"complete","content":"alpha","reason":"r"}]}"#);
-        assert_eq!(changes.open_sub_items(0, &items), 0);
+        assert_eq!(changes.open_sub_items(0, dir.path(), &items), 0);
     }
 
     #[test]
