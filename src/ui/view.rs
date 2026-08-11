@@ -122,6 +122,9 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
     if app.mode == Mode::ViewMenu {
         render_view_menu(app, frame, f.top_bar);
     }
+    if app.mode == Mode::ServiceMenu {
+        render_service_menu(app, frame, f.top_bar);
+    }
     Rendered {
         frames: f,
         modal_rows,
@@ -635,14 +638,24 @@ fn render_top_bar(app: &App, frame: &mut Frame, area: Rect) {
             theme.query(),
         ));
     }
-    // The view tab sits at the right edge; `view_tab_rect` must agree with
-    // this padding for clicks to land on it.
+    // The service and view tabs sit at the right edge; `service_tab_rect` and
+    // `view_tab_rect` must agree with this padding for clicks to land on them.
     let label = view_tab_label();
+    let service = service_tab_label(app);
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let gap = (area.width as usize)
         .saturating_sub(used)
-        .saturating_sub(label.chars().count());
+        .saturating_sub(label.chars().count())
+        .saturating_sub(service.chars().count());
     spans.push(Span::styled(" ".repeat(gap), theme.statusbar()));
+    spans.push(Span::styled(
+        service,
+        if app.mode == Mode::ServiceMenu {
+            theme.selected(&theme.statusbar())
+        } else {
+            theme.header()
+        },
+    ));
     spans.push(Span::styled(
         label,
         if app.mode == Mode::ViewMenu {
@@ -719,6 +732,72 @@ fn render_view_menu(app: &App, frame: &mut Frame, top_bar: Rect) {
                 .borders(Borders::ALL)
                 .border_style(theme.eff_border(true))
                 .title("view"),
+        ),
+        area,
+    );
+}
+
+/// The active service's name, as its tab reads.
+pub fn service_tab_label(app: &App) -> String {
+    match &app.service {
+        Some(service) => format!(" {} ▾ ", service.name),
+        None => " no model ▾ ".to_string(),
+    }
+}
+
+/// Where the service tab was drawn, for mouse hit-testing.
+pub fn service_tab_rect(app: &App, top_bar: Rect) -> Rect {
+    let width = service_tab_label(app).chars().count() as u16;
+    let view = view_tab_rect(top_bar);
+    Rect {
+        x: view.x.saturating_sub(width),
+        y: top_bar.y,
+        width: width.min(top_bar.width),
+        height: 1,
+    }
+}
+
+/// Where the service menu is drawn, so clicks can be routed to its entries.
+pub fn service_menu_rect(app: &App, top_bar: Rect) -> Rect {
+    let tab = service_tab_rect(app, top_bar);
+    Rect {
+        x: tab.x,
+        y: top_bar.y + 1,
+        width: 30u16.min(top_bar.width),
+        height: app.config_services().len() as u16 + 2,
+    }
+}
+
+/// The service picker, drawn under its tab.
+fn render_service_menu(app: &App, frame: &mut Frame, top_bar: Rect) {
+    let theme = &app.theme;
+    let area = service_menu_rect(app, top_bar);
+
+    let lines: Vec<Line> = app
+        .config_services()
+        .iter()
+        .enumerate()
+        .map(|(index, service)| {
+            let selected = index == app.service_cursor;
+            let style = if selected {
+                theme.selected(&Style::default())
+            } else {
+                theme.paragraph()
+            };
+            Line::from(Span::styled(
+                format!("{}{}", if selected { "▸ " } else { "  " }, service.name),
+                style,
+            ))
+        })
+        .collect();
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title("model"),
         ),
         area,
     );
@@ -1148,6 +1227,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
         )),
         (None, None, Mode::ViewMenu) => Line::from(Span::styled(
             " j/k move · space toggle · esc close ".to_string(),
+            theme.statusbar(),
+        )),
+        (None, None, Mode::ServiceMenu) => Line::from(Span::styled(
+            " j/k move · enter select · esc close ".to_string(),
             theme.statusbar(),
         )),
         (None, None, Mode::Modal) => Line::from(Span::styled(

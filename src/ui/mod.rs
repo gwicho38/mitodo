@@ -162,6 +162,8 @@ pub enum Mode {
     AskingAgent(Verb),
     /// The view-settings menu is open.
     ViewMenu,
+    /// The service picker is open.
+    ServiceMenu,
     /// Editing the notes inside the detail pane.
     EditingDetail,
     /// The new-item dialog is open.
@@ -353,6 +355,9 @@ pub struct App {
     pub new_item: NewItem,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
+    /// The model service in force, and the cursor within its picker.
+    pub service: Option<crate::config::ServiceConfig>,
+    pub service_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
     /// from the cursor, so the wheel can scroll without moving the selection.
     pub item_scroll: usize,
@@ -385,6 +390,7 @@ impl App {
         let hide_done = config.ui.hide_done;
         let config_wrap = config.ui.wrap;
         let ticker = config.ui.ticker.then(|| TickerState::new(2));
+        let active = config.active_service();
         Self {
             workspace,
             config,
@@ -399,7 +405,9 @@ impl App {
             query: None,
             query_error: None,
             edit_buffer: String::new(),
-            notice: None,
+            // A config naming a service this machine lacks is reported once, on
+            // the status line, rather than failing the workspace open.
+            notice: active.notice,
             modal: None,
             modal_scroll: 0,
             modal_rows: 0,
@@ -416,6 +424,8 @@ impl App {
             editor: Editor::default(),
             new_item: NewItem::default(),
             view_cursor: 0,
+            service: active.service,
+            service_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
             items_height: None,
@@ -756,6 +766,7 @@ impl App {
             Mode::ReviewingChangeSet => self.handle_review_key(key),
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
+            Mode::ServiceMenu => self.handle_service_key(key),
             Mode::EditingDetail => self.handle_detail_key(key),
             Mode::NewItem => self.handle_new_item_key(key),
         }
@@ -992,6 +1003,42 @@ impl App {
             K::Char(' ') | K::Enter => self.toggle_view_setting(ViewSetting::ALL[self.view_cursor]),
             _ => {}
         }
+    }
+
+    fn open_service_menu(&mut self) {
+        let services = self.config.services();
+        if services.is_empty() {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
+            return;
+        }
+        self.service_cursor = self
+            .service
+            .as_ref()
+            .and_then(|active| services.iter().position(|s| s.name == active.name))
+            .unwrap_or(0);
+        self.mode = Mode::ServiceMenu;
+    }
+
+    fn handle_service_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let last = self.config.services().len().saturating_sub(1);
+        match key.code {
+            K::Esc | K::Char('q') | K::Char('m') => self.mode = Mode::Normal,
+            K::Char('j') | K::Down => self.service_cursor = (self.service_cursor + 1).min(last),
+            K::Char('k') | K::Up => self.service_cursor = self.service_cursor.saturating_sub(1),
+            K::Enter | K::Char(' ') => self.select_service(self.service_cursor),
+            _ => self.mode = Mode::Normal,
+        }
+    }
+
+    pub fn select_service(&mut self, index: usize) {
+        self.mode = Mode::Normal;
+        let Some(chosen) = self.config.services().get(index).cloned() else {
+            return;
+        };
+        self.notice = Some(format!("service: {}", chosen.name));
+        self.config.ui.service = Some(chosen.name.clone());
+        self.service = Some(chosen);
     }
 
     /// Open the review list over whatever was proposed.
@@ -1330,6 +1377,7 @@ impl App {
                 self.view_cursor = 0;
                 self.mode = Mode::ViewMenu;
             }
+            (K::Char('m'), KeyModifiers::NONE) => self.open_service_menu(),
             (K::Char('N'), _) => self.show_notes(),
             (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
@@ -1371,10 +1419,17 @@ impl App {
             self.notice = None;
         }
 
-        // The view menu is one of two overlays that take clicks.
+        // The two top-bar menus take clicks, as does the new-item dialog below.
         if self.mode == Mode::ViewMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.click_view_menu(x, y);
+            }
+            return;
+        }
+
+        if self.mode == Mode::ServiceMenu {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.click_service_menu(x, y);
             }
             return;
         }
@@ -1526,11 +1581,32 @@ impl App {
         }
     }
 
+    /// A click while the service picker is open: select an entry, or dismiss.
+    fn click_service_menu(&mut self, x: u16, y: u16) {
+        let tab = view::service_tab_rect(self, self.layout.top_bar);
+        if within(tab, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let menu = view::service_menu_rect(self, self.layout.top_bar);
+        if !within(menu, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if let Some(row) = row_index(menu, y) {
+            self.select_service(row);
+        }
+    }
+
     fn click_at(&mut self, x: u16, y: u16) {
-        // The view tab lives in the top bar and opens its menu.
+        // The tabs live in the top bar and open their menus.
         if within(view::view_tab_rect(self.layout.top_bar), x, y) {
             self.view_cursor = 0;
             self.mode = Mode::ViewMenu;
+            return;
+        }
+        if within(view::service_tab_rect(self, self.layout.top_bar), x, y) {
+            self.open_service_menu();
             return;
         }
         if within(self.layout.groups, x, y) {
@@ -1757,6 +1833,11 @@ impl App {
         }
     }
 
+    /// The configured services, for the picker to list.
+    pub fn config_services(&self) -> Vec<crate::config::ServiceConfig> {
+        self.config.services()
+    }
+
     /// Each group's todo file mapped to its archive directory, for change-sets
     /// that span groups.
     pub fn archive_dirs(&self) -> std::collections::HashMap<PathBuf, PathBuf> {
@@ -1977,7 +2058,7 @@ impl App {
     fn spawn_agent(&mut self, verb: Verb, input: String) {
         // Before the sender check: an unconfigured agent is worth reporting even
         // when there is no channel to run one on.
-        let Some(service) = self.config.active_service().service else {
+        let Some(service) = self.service.clone() else {
             self.notice = Some("no agent configured (set [[services]])".to_string());
             return;
         };
@@ -2233,6 +2314,109 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn app_with_services() -> App {
+        let service_list = vec![
+            crate::config::ServiceConfig {
+                name: "claude".to_string(),
+                command: vec!["echo".to_string()],
+                schema_mode: crate::config::SchemaMode::Flag,
+                schema_flag: Some("--json-schema".to_string()),
+                timeout_secs: 600,
+            },
+            crate::config::ServiceConfig {
+                name: "ollama".to_string(),
+                command: vec!["echo".to_string()],
+                schema_mode: crate::config::SchemaMode::Prompt,
+                schema_flag: None,
+                timeout_secs: 300,
+            },
+        ];
+        App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![group("a")],
+                items: vec![item("a", "a-open", false)],
+            },
+            Config {
+                service_list,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn m_opens_the_service_picker_on_the_active_service() {
+        let mut app = app_with_services();
+        app.config.ui.service = Some("ollama".to_string());
+        app.service = app.config.active_service().service;
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.mode, Mode::ServiceMenu);
+        assert_eq!(app.service_cursor, 1, "the cursor starts on the active one");
+    }
+
+    #[test]
+    fn selecting_in_the_picker_switches_the_active_service() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.service.as_ref().unwrap().name, "ollama");
+        assert_eq!(app.config.ui.service.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn esc_leaves_the_picker_without_switching() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.service.as_ref().unwrap().name, "claude");
+    }
+
+    #[test]
+    fn the_picker_says_so_when_no_service_is_configured() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no agent configured")
+        );
+    }
+
+    #[test]
+    fn the_top_bar_names_the_active_service() {
+        let app = app_with_services();
+        assert!(crate::ui::view::service_tab_label(&app).contains("claude"));
+    }
+
+    // A config shared between machines can name a service this one lacks.
+    #[test]
+    fn an_unknown_configured_service_is_reported_at_startup() {
+        let config = Config {
+            service_list: app_with_services().config_services(),
+            ui: crate::config::UiConfig {
+                service: Some("gpt5".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let app = App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![group("a")],
+                items: Vec::new(),
+            },
+            config,
+        );
+        assert_eq!(app.service.as_ref().unwrap().name, "claude");
+        assert!(app.notice.as_deref().unwrap().contains("gpt5"));
     }
 
     #[test]
