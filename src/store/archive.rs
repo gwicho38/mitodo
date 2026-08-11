@@ -67,7 +67,7 @@ pub fn archive_done(
     items: &[Item],
     date: &str,
 ) -> Result<ArchiveReport, WriteError> {
-    let (mut lines, ending, trailing) = read_lines(todo_file)?;
+    let (lines, _, _) = read_lines(todo_file)?;
     let mut report = ArchiveReport::default();
 
     // Candidates are top-level done items in this file, deepest last so that
@@ -78,10 +78,48 @@ pub fn archive_done(
         .collect();
     candidates.sort_by_key(|i| i.line);
 
+    let mut targets: Vec<&Item> = Vec::new();
+    for item in candidates {
+        // A line that moved fails `verify` inside archive_items; this guard only
+        // needs the lines it can still trust.
+        if item.line < lines.len()
+            && !wholly_done(&lines, item.line..subtree_end(&lines, item.line))
+        {
+            report
+                .skipped
+                .push(format!("{:?}: has open sub-items", item.text));
+            continue;
+        }
+        targets.push(item);
+    }
+
+    let moved = archive_items(todo_file, archive_dir, &targets, date)?;
+    report.archived = moved.archived;
+    report.skipped.extend(moved.skipped);
+    Ok(report)
+}
+
+/// Move each named item, and everything under it, into `archive_dir/TODO.md`.
+///
+/// Unconditional on state: the caller decides what deserves archiving. An item
+/// whose line no longer matches the file is skipped and reported rather than
+/// guessed at.
+pub fn archive_items(
+    todo_file: &Path,
+    archive_dir: &Path,
+    targets: &[&Item],
+    date: &str,
+) -> Result<ArchiveReport, WriteError> {
+    let (mut lines, ending, trailing) = read_lines(todo_file)?;
+    let mut report = ArchiveReport::default();
+
+    let mut ordered: Vec<&&Item> = targets.iter().collect();
+    ordered.sort_by_key(|i| i.line);
+
     let mut moved: Vec<(usize, usize)> = Vec::new();
     let mut block: Vec<String> = Vec::new();
 
-    for item in &candidates {
+    for item in ordered {
         if verify(todo_file, &lines, item.line, &item.raw).is_err() {
             report
                 .skipped
@@ -89,12 +127,6 @@ pub fn archive_done(
             continue;
         }
         let end = subtree_end(&lines, item.line);
-        if !wholly_done(&lines, item.line..end) {
-            report
-                .skipped
-                .push(format!("{:?}: has open sub-items", item.text));
-            continue;
-        }
         block.extend_from_slice(&lines[item.line..end]);
         moved.push((item.line, end));
         report.archived += 1;
@@ -172,6 +204,73 @@ mod tests {
 
     fn read(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    // The agent path archives one named item, whatever its state — unlike `X`,
+    // which only sweeps finished ones.
+    #[test]
+    fn one_named_open_item_is_moved_and_its_siblings_are_left() {
+        let (_dir, todo, archive, items) = workspace("## P0\n\n- [ ] alpha\n- [ ] beta\n");
+        let target: Vec<&Item> = items.iter().filter(|i| i.text == "alpha").collect();
+        assert_eq!(target.len(), 1, "fixture has one alpha");
+
+        let report = archive_items(&todo, &archive, &target, "2026-08-11").unwrap();
+        assert_eq!(report.archived, 1);
+
+        let left = read(&todo);
+        assert!(!left.contains("alpha"), "moved out: {left}");
+        assert!(left.contains("beta"), "sibling untouched: {left}");
+
+        let moved = read(&archive.join("TODO.md"));
+        assert!(moved.contains("## Archived 2026-08-11"));
+        assert!(moved.contains("- [ ] alpha"), "verbatim: {moved}");
+    }
+
+    #[test]
+    fn an_items_subtree_travels_with_it() {
+        let body = "## P0\n\n- [ ] parent\n  > why it matters\n  - [ ] child\n- [ ] other\n";
+        let (_dir, todo, archive, items) = workspace(body);
+        let target: Vec<&Item> = items.iter().filter(|i| i.text == "parent").collect();
+
+        archive_items(&todo, &archive, &target, "2026-08-11").unwrap();
+
+        let left = read(&todo);
+        assert!(
+            !left.contains("child") && !left.contains("why it matters"),
+            "{left}"
+        );
+        assert!(left.contains("other"));
+        let moved = read(&archive.join("TODO.md"));
+        assert!(
+            moved.contains("child") && moved.contains("why it matters"),
+            "{moved}"
+        );
+    }
+
+    #[test]
+    fn an_item_whose_line_moved_on_disk_is_skipped_not_guessed_at() {
+        let (_dir, todo, archive, items) = workspace("## P0\n\n- [ ] alpha\n- [ ] beta\n");
+        let target: Vec<&Item> = items.iter().filter(|i| i.text == "alpha").collect();
+        std::fs::write(&todo, "## P0\n\n- [ ] something else entirely\n").unwrap();
+
+        let report = archive_items(&todo, &archive, &target, "2026-08-11").unwrap();
+        assert_eq!(report.archived, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].contains("file changed on disk"),
+            "{:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn archiving_nothing_writes_nothing() {
+        let (_dir, todo, archive, _items) = workspace("## P0\n\n- [ ] alpha\n");
+        let before = read(&todo);
+        let report = archive_items(&todo, &archive, &[], "2026-08-11").unwrap();
+        assert_eq!(report.archived, 0);
+        assert_eq!(read(&todo), before);
+        assert!(!archive.join("TODO.md").exists(), "no empty archive file");
     }
 
     #[test]

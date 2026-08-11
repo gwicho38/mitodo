@@ -10,7 +10,7 @@ pub mod watch;
 pub mod workspace;
 pub mod write;
 
-pub use archive::{ArchiveReport, archive_done};
+pub use archive::{ArchiveReport, archive_done, archive_items};
 pub use detect::{Detection, detect};
 pub use model::{Group, Item, ItemId, Priority};
 pub use parse::parse_todo_file;
