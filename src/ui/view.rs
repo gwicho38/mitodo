@@ -395,6 +395,19 @@ pub fn review_first_row(area: Rect) -> u16 {
     review_rect(area).y + 2
 }
 
+/// A change as its review row reads: an archive row also states the open work
+/// it would carry out of the working file.
+fn review_row(app: &App, pending: &super::Pending, index: usize) -> String {
+    let mut text = pending.row(index);
+    if let super::Pending::Changes(set) = pending {
+        let open = set.open_sub_items(index, &app.workspace.items);
+        if open > 0 {
+            text.push_str(&format!("  ({open} open sub-items)"));
+        }
+    }
+    text
+}
+
 /// The proposed change-set, as a list you can pick from.
 fn render_review(app: &App, frame: &mut Frame, area: Rect) {
     let theme = &app.theme;
@@ -444,7 +457,7 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
         );
         let room = width.saturating_sub(prefix.chars().count()).max(1);
         lines.push(Line::from(Span::styled(
-            format!("{prefix}{}", truncate(&set.row(index), room)),
+            format!("{prefix}{}", truncate(&review_row(app, set, index), room)),
             style,
         )));
     }
@@ -452,7 +465,7 @@ fn render_review(app: &App, frame: &mut Frame, area: Rect) {
     // The highlighted change in full, wrapped, with why it was proposed.
     if total > 0 {
         lines.push(Line::from(""));
-        for line in wrap_text(&set.row(app.review_cursor), width) {
+        for line in wrap_text(&review_row(app, set, app.review_cursor), width) {
             lines.push(Line::from(Span::styled(line, theme.header())));
         }
         let reason = set.reason(app.review_cursor);

@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::agent::{self, ChangeSet, Verb};
+use crate::agent::{self, ChangeAction, ChangeSet, Verb};
 use crate::config::Config;
 use crate::config::Theme;
 use crate::git;
@@ -62,6 +62,16 @@ impl Pending {
         match self {
             Pending::Changes(set) => set.reason(index),
             Pending::SubItems { .. } => String::new(),
+        }
+    }
+
+    pub fn is_archive(&self, index: usize) -> bool {
+        match self {
+            Pending::Changes(set) => set
+                .changes
+                .get(index)
+                .is_some_and(|c| c.action == ChangeAction::Archive),
+            Pending::SubItems { .. } => false,
         }
     }
 }
@@ -1043,9 +1053,12 @@ impl App {
 
     /// Open the review list over whatever was proposed.
     fn begin_review(&mut self, pending: Pending) {
-        // Everything starts picked: the common case is accepting the lot, and
-        // unpicking is easier than picking from nothing.
-        self.review_selected = vec![true; pending.len()];
+        // Everything starts picked — the common case is accepting the lot, and
+        // unpicking is easier than picking from nothing — except a move out of
+        // the working file, which is opted into.
+        self.review_selected = (0..pending.len())
+            .map(|index| !pending.is_archive(index))
+            .collect();
         self.review_cursor = 0;
         self.review_scroll = 0;
         self.pending = Some(pending);
@@ -1401,6 +1414,7 @@ impl App {
                 None => self.notice = Some("no item selected".to_string()),
             },
             (K::Char('R'), _) => self.spawn_agent(Verb::Scan, String::new()),
+            (K::Char('M'), _) => self.begin_ask(Verb::Manage),
             // Guarded rather than nested: deleting nothing is not a mode.
             (K::Char('d'), KeyModifiers::NONE) if self.selected_item().is_some() => {
                 self.mode = Mode::ConfirmingDelete;
@@ -2417,6 +2431,84 @@ mod tests {
         );
         assert_eq!(app.service.as_ref().unwrap().name, "claude");
         assert!(app.notice.as_deref().unwrap().contains("gpt5"));
+    }
+
+    fn archive_change_set() -> ChangeSet {
+        ChangeSet::parse(
+            r#"{"summary":"s","changes":[
+                {"file":"a","action":"add","content":"new","reason":"r"},
+                {"file":"a","action":"archive","content":"a-open","reason":"r"},
+                {"file":"a","action":"complete","content":"a-open","reason":"r"}]}"#,
+        )
+        .unwrap()
+    }
+
+    // A move out of the working file is opted into, never opted out of.
+    #[test]
+    fn archive_rows_start_unticked_and_the_rest_start_ticked() {
+        let mut app = app();
+        app.begin_review(Pending::Changes(archive_change_set()));
+        assert_eq!(app.review_selected, vec![true, false, true]);
+    }
+
+    #[test]
+    fn applying_a_review_of_only_archive_rows_says_nothing_was_selected() {
+        let mut app = app();
+        let only_archive = ChangeSet::parse(
+            r#"{"summary":"s","changes":[
+                {"file":"a","action":"archive","content":"a-open","reason":"r"}]}"#,
+        )
+        .unwrap();
+        app.begin_review(Pending::Changes(only_archive));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nothing selected")
+        );
+    }
+
+    #[test]
+    fn space_can_still_tick_an_archive_row() {
+        let mut app = app();
+        app.begin_review(Pending::Changes(archive_change_set()));
+        app.review_cursor = 1;
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.review_selected[1]);
+    }
+
+    #[test]
+    fn m_uppercase_opens_the_manage_prompt() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.mode, Mode::AskingAgent(Verb::Manage));
+    }
+
+    #[test]
+    fn the_manage_prompt_needs_a_configured_service() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no agent configured")
+        );
+    }
+
+    #[test]
+    fn archive_dirs_maps_each_groups_todo_file_to_its_archive() {
+        let app = app();
+        let map = app.archive_dirs();
+        for group in &app.workspace.groups {
+            match &group.archive_dir {
+                Some(dir) => assert_eq!(map.get(&group.todo_file), Some(dir)),
+                None => assert!(!map.contains_key(&group.todo_file)),
+            }
+        }
     }
 
     #[test]
