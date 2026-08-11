@@ -10,7 +10,7 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::agent::{self, ChangeSet, Verb};
+use crate::agent::{self, ChangeAction, ChangeSet, Verb};
 use crate::config::Config;
 use crate::config::Theme;
 use crate::git;
@@ -62,6 +62,16 @@ impl Pending {
         match self {
             Pending::Changes(set) => set.reason(index),
             Pending::SubItems { .. } => String::new(),
+        }
+    }
+
+    pub fn is_archive(&self, index: usize) -> bool {
+        match self {
+            Pending::Changes(set) => set
+                .changes
+                .get(index)
+                .is_some_and(|c| c.action == ChangeAction::Archive),
+            Pending::SubItems { .. } => false,
         }
     }
 }
@@ -162,6 +172,8 @@ pub enum Mode {
     AskingAgent(Verb),
     /// The view-settings menu is open.
     ViewMenu,
+    /// The service picker is open.
+    ServiceMenu,
     /// Editing the notes inside the detail pane.
     EditingDetail,
     /// The new-item dialog is open.
@@ -339,6 +351,9 @@ pub struct App {
     pub review_scroll: usize,
     /// The background task in flight, if any.
     pub busy: Option<Busy>,
+    /// Set to stop the agent call in flight. A fresh flag per call, so
+    /// cancelling one does not kill the next.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Scrolling ticker, when enabled.
     pub ticker: Option<TickerState>,
     /// Wrap long item text instead of truncating it.
@@ -353,6 +368,9 @@ pub struct App {
     pub new_item: NewItem,
     /// Cursor position within the view-settings menu.
     pub view_cursor: usize,
+    /// The model service in force, and the cursor within its picker.
+    pub service: Option<crate::config::ServiceConfig>,
+    pub service_cursor: usize,
     /// First visible row of the item list. Owned by the view, not derived
     /// from the cursor, so the wheel can scroll without moving the selection.
     pub item_scroll: usize,
@@ -385,6 +403,7 @@ impl App {
         let hide_done = config.ui.hide_done;
         let config_wrap = config.ui.wrap;
         let ticker = config.ui.ticker.then(|| TickerState::new(2));
+        let active = config.active_service();
         Self {
             workspace,
             config,
@@ -399,7 +418,9 @@ impl App {
             query: None,
             query_error: None,
             edit_buffer: String::new(),
-            notice: None,
+            // A config naming a service this machine lacks is reported once, on
+            // the status line, rather than failing the workspace open.
+            notice: active.notice,
             modal: None,
             modal_scroll: 0,
             modal_rows: 0,
@@ -409,6 +430,7 @@ impl App {
             review_cursor: 0,
             review_scroll: 0,
             busy: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ticker,
             wrap: config_wrap,
             collapsed: std::collections::HashSet::new(),
@@ -416,6 +438,8 @@ impl App {
             editor: Editor::default(),
             new_item: NewItem::default(),
             view_cursor: 0,
+            service: active.service,
+            service_cursor: 0,
             item_scroll: 0,
             group_scroll: 0,
             items_height: None,
@@ -455,6 +479,7 @@ impl App {
             // Not a view toggle; preserve whatever the user configured.
             mouse: self.config.ui.mouse,
             wrap: self.wrap,
+            service: self.config.ui.service.clone(),
         };
         if current == self.config.ui {
             return;
@@ -676,6 +701,10 @@ impl App {
                 }
             }
             Message::Event(Event::TaskFinished { title, body }) => {
+                // A cancelled call still reports back; the user already knows.
+                if self.busy.is_none() && body.trim_end().ends_with("cancelled") {
+                    return;
+                }
                 self.busy = None;
                 self.open_modal(&title, body.lines().map(|l| l.to_string()).collect());
             }
@@ -755,6 +784,7 @@ impl App {
             Mode::ReviewingChangeSet => self.handle_review_key(key),
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
+            Mode::ServiceMenu => self.handle_service_key(key),
             Mode::EditingDetail => self.handle_detail_key(key),
             Mode::NewItem => self.handle_new_item_key(key),
         }
@@ -993,11 +1023,59 @@ impl App {
         }
     }
 
+    /// Stop the agent call in flight. The spinner clears at once rather than
+    /// waiting for the thread, so the UI never looks stuck.
+    fn cancel_agent(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let label = self.busy.take().map(|b| b.label).unwrap_or_default();
+        self.notice = Some(format!("{label} cancelled"));
+    }
+
+    fn open_service_menu(&mut self) {
+        let services = self.config.services();
+        if services.is_empty() {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
+            return;
+        }
+        self.service_cursor = self
+            .service
+            .as_ref()
+            .and_then(|active| services.iter().position(|s| s.name == active.name))
+            .unwrap_or(0);
+        self.mode = Mode::ServiceMenu;
+    }
+
+    fn handle_service_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let last = self.config.services().len().saturating_sub(1);
+        match key.code {
+            K::Esc | K::Char('q') | K::Char('m') => self.mode = Mode::Normal,
+            K::Char('j') | K::Down => self.service_cursor = (self.service_cursor + 1).min(last),
+            K::Char('k') | K::Up => self.service_cursor = self.service_cursor.saturating_sub(1),
+            K::Enter | K::Char(' ') => self.select_service(self.service_cursor),
+            _ => self.mode = Mode::Normal,
+        }
+    }
+
+    pub fn select_service(&mut self, index: usize) {
+        self.mode = Mode::Normal;
+        let Some(chosen) = self.config.services().get(index).cloned() else {
+            return;
+        };
+        self.notice = Some(format!("service: {}", chosen.name));
+        self.config.ui.service = Some(chosen.name.clone());
+        self.service = Some(chosen);
+    }
+
     /// Open the review list over whatever was proposed.
     fn begin_review(&mut self, pending: Pending) {
-        // Everything starts picked: the common case is accepting the lot, and
-        // unpicking is easier than picking from nothing.
-        self.review_selected = vec![true; pending.len()];
+        // Everything starts picked — the common case is accepting the lot, and
+        // unpicking is easier than picking from nothing — except a move out of
+        // the working file, which is opted into.
+        self.review_selected = (0..pending.len())
+            .map(|index| !pending.is_archive(index))
+            .collect();
         self.review_cursor = 0;
         self.review_scroll = 0;
         self.pending = Some(pending);
@@ -1133,8 +1211,14 @@ impl App {
         let (applied, skipped) = match pending {
             Pending::Changes(set) => {
                 let picked = set.selected(&self.review_selected);
-                let report =
-                    agent::changeset::apply(&self.workspace.root, &self.workspace.items, &picked);
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let report = agent::changeset::apply(
+                    &self.workspace.root,
+                    &self.archive_dirs(),
+                    &today,
+                    &self.workspace.items,
+                    &picked,
+                );
                 (report.applied, report.skipped)
             }
             Pending::SubItems { parent, lines } => self.apply_sub_items(&parent, &lines),
@@ -1270,7 +1354,13 @@ impl App {
                 self.mode = Mode::EditingQuery;
                 self.query_error = None;
             }
-            (K::Esc, _) => self.clear_query(),
+            (K::Esc, _) => {
+                if self.busy.is_some() {
+                    self.cancel_agent();
+                } else {
+                    self.clear_query();
+                }
+            }
             (K::Char('q'), KeyModifiers::NONE) => self.should_quit = true,
             (K::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
 
@@ -1323,6 +1413,7 @@ impl App {
                 self.view_cursor = 0;
                 self.mode = Mode::ViewMenu;
             }
+            (K::Char('m'), KeyModifiers::NONE) => self.open_service_menu(),
             (K::Char('N'), _) => self.show_notes(),
             (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
@@ -1346,6 +1437,7 @@ impl App {
                 None => self.notice = Some("no item selected".to_string()),
             },
             (K::Char('R'), _) => self.spawn_agent(Verb::Scan, String::new()),
+            (K::Char('M'), _) => self.begin_ask(Verb::Manage),
             // Guarded rather than nested: deleting nothing is not a mode.
             (K::Char('d'), KeyModifiers::NONE) if self.selected_item().is_some() => {
                 self.mode = Mode::ConfirmingDelete;
@@ -1364,10 +1456,17 @@ impl App {
             self.notice = None;
         }
 
-        // The view menu is one of two overlays that take clicks.
+        // The two top-bar menus take clicks, as does the new-item dialog below.
         if self.mode == Mode::ViewMenu {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 self.click_view_menu(x, y);
+            }
+            return;
+        }
+
+        if self.mode == Mode::ServiceMenu {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.click_service_menu(x, y);
             }
             return;
         }
@@ -1519,11 +1618,32 @@ impl App {
         }
     }
 
+    /// A click while the service picker is open: select an entry, or dismiss.
+    fn click_service_menu(&mut self, x: u16, y: u16) {
+        let tab = view::service_tab_rect(self, self.layout.top_bar);
+        if within(tab, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        let menu = view::service_menu_rect(self, self.layout.top_bar);
+        if !within(menu, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        if let Some(row) = row_index(menu, y) {
+            self.select_service(row);
+        }
+    }
+
     fn click_at(&mut self, x: u16, y: u16) {
-        // The view tab lives in the top bar and opens its menu.
+        // The tabs live in the top bar and open their menus.
         if within(view::view_tab_rect(self.layout.top_bar), x, y) {
             self.view_cursor = 0;
             self.mode = Mode::ViewMenu;
+            return;
+        }
+        if within(view::service_tab_rect(self, self.layout.top_bar), x, y) {
+            self.open_service_menu();
             return;
         }
         if within(self.layout.groups, x, y) {
@@ -1750,6 +1870,21 @@ impl App {
         }
     }
 
+    /// The configured services, for the picker to list.
+    pub fn config_services(&self) -> Vec<crate::config::ServiceConfig> {
+        self.config.services()
+    }
+
+    /// Each group's todo file mapped to its archive directory, for change-sets
+    /// that span groups.
+    pub fn archive_dirs(&self) -> std::collections::HashMap<PathBuf, PathBuf> {
+        self.workspace
+            .groups
+            .iter()
+            .filter_map(|g| g.archive_dir.clone().map(|dir| (g.todo_file.clone(), dir)))
+            .collect()
+    }
+
     /// The selected group's todo and archive paths, if archiving is possible.
     fn archive_target(&self) -> Option<(PathBuf, PathBuf)> {
         let group = self.selected_group()?;
@@ -1831,8 +1966,8 @@ impl App {
     }
 
     fn begin_ask(&mut self, verb: Verb) {
-        if self.config.agent.command.is_empty() {
-            self.notice = Some("no agent configured (set [agent] command)".to_string());
+        if self.config.active_service().service.is_none() {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
             return;
         }
         self.edit_buffer.clear();
@@ -1958,10 +2093,12 @@ impl App {
     }
 
     fn spawn_agent(&mut self, verb: Verb, input: String) {
-        if self.config.agent.command.is_empty() {
-            self.notice = Some("no agent configured (set [agent] command)".to_string());
+        // Before the sender check: an unconfigured agent is worth reporting even
+        // when there is no channel to run one on.
+        let Some(service) = self.service.clone() else {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
             return;
-        }
+        };
         let Some(sender) = self.sender.clone() else {
             return;
         };
@@ -1972,25 +2109,17 @@ impl App {
             &self.files_context(),
             &self.item_context(),
         );
-        let command = self.config.agent.command.clone();
-        let schema_flag = self.config.agent.schema_flag.clone();
-        let timeout = self.config.agent.timeout_secs;
         let root = self.workspace.root.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel = cancel.clone();
 
         self.busy = Some(Busy::new(verb.label()));
         std::thread::spawn(move || {
-            let result = agent::run(
-                &command,
-                schema_flag.as_deref(),
-                verb.schema(),
-                &prompt,
-                &root,
-                timeout,
-            );
+            let result = agent::run(&service, verb.schema(), &prompt, &root, &cancel);
             let event = match result {
                 Err(err) => Event::TaskFinished {
                     title: format!("{} failed", verb.label()),
-                    body: err.to_string(),
+                    body: format!("{}: {err}", service.name),
                 },
                 Ok(json) => interpret(verb, &json),
             };
@@ -2036,7 +2165,7 @@ fn interpret(verb: Verb, json: &str) -> Event {
             Ok(items) => Event::SubItemsProposed(items),
             Err(err) => fail(verb, err.to_string()),
         },
-        Verb::Scan => match ChangeSet::parse(json) {
+        Verb::Scan | Verb::Manage => match ChangeSet::parse(json) {
             Ok(set) => Event::ChangeSetProposed(set),
             Err(err) => fail(verb, err.to_string()),
         },
@@ -2081,7 +2210,9 @@ fn help_lines() -> Vec<String> {
         "  S  summarise the view · E  explain this item",
         "  b  break this item into sub-items",
         "  !  ask an agent to act on this item",
-        "  R  scan for changes   s  git sync",
+        "  R  scan for changes   M  manage items with the agent",
+        "  m  pick model service  esc  cancel a running call",
+        "  s  git sync",
         "",
         "chyron",
         "  c  toggle ticker      p  pause",
@@ -2223,6 +2354,234 @@ mod tests {
 
     fn press(app: &mut App, code: KeyCode) {
         app.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn app_with_services() -> App {
+        let service_list = vec![
+            crate::config::ServiceConfig {
+                name: "claude".to_string(),
+                command: vec!["echo".to_string()],
+                schema_mode: crate::config::SchemaMode::Flag,
+                schema_flag: Some("--json-schema".to_string()),
+                timeout_secs: 600,
+            },
+            crate::config::ServiceConfig {
+                name: "ollama".to_string(),
+                command: vec!["echo".to_string()],
+                schema_mode: crate::config::SchemaMode::Prompt,
+                schema_flag: None,
+                timeout_secs: 300,
+            },
+        ];
+        App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![group("a")],
+                items: vec![item("a", "a-open", false)],
+            },
+            Config {
+                service_list,
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn m_opens_the_service_picker_on_the_active_service() {
+        let mut app = app_with_services();
+        app.config.ui.service = Some("ollama".to_string());
+        app.service = app.config.active_service().service;
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.mode, Mode::ServiceMenu);
+        assert_eq!(app.service_cursor, 1, "the cursor starts on the active one");
+    }
+
+    #[test]
+    fn selecting_in_the_picker_switches_the_active_service() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.service.as_ref().unwrap().name, "ollama");
+        assert_eq!(app.config.ui.service.as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn esc_leaves_the_picker_without_switching() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('m'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.service.as_ref().unwrap().name, "claude");
+    }
+
+    #[test]
+    fn the_picker_says_so_when_no_service_is_configured() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no agent configured")
+        );
+    }
+
+    #[test]
+    fn the_top_bar_names_the_active_service() {
+        let app = app_with_services();
+        assert!(crate::ui::view::service_tab_label(&app).contains("claude"));
+    }
+
+    // A config shared between machines can name a service this one lacks.
+    #[test]
+    fn an_unknown_configured_service_is_reported_at_startup() {
+        let config = Config {
+            service_list: app_with_services().config_services(),
+            ui: crate::config::UiConfig {
+                service: Some("gpt5".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let app = App::new(
+            Workspace {
+                root: PathBuf::from("/w"),
+                groups: vec![group("a")],
+                items: Vec::new(),
+            },
+            config,
+        );
+        assert_eq!(app.service.as_ref().unwrap().name, "claude");
+        assert!(app.notice.as_deref().unwrap().contains("gpt5"));
+    }
+
+    fn archive_change_set() -> ChangeSet {
+        ChangeSet::parse(
+            r#"{"summary":"s","changes":[
+                {"file":"a","action":"add","content":"new","reason":"r"},
+                {"file":"a","action":"archive","content":"a-open","reason":"r"},
+                {"file":"a","action":"complete","content":"a-open","reason":"r"}]}"#,
+        )
+        .unwrap()
+    }
+
+    // A move out of the working file is opted into, never opted out of.
+    #[test]
+    fn archive_rows_start_unticked_and_the_rest_start_ticked() {
+        let mut app = app();
+        app.begin_review(Pending::Changes(archive_change_set()));
+        assert_eq!(app.review_selected, vec![true, false, true]);
+    }
+
+    #[test]
+    fn applying_a_review_of_only_archive_rows_says_nothing_was_selected() {
+        let mut app = app();
+        let only_archive = ChangeSet::parse(
+            r#"{"summary":"s","changes":[
+                {"file":"a","action":"archive","content":"a-open","reason":"r"}]}"#,
+        )
+        .unwrap();
+        app.begin_review(Pending::Changes(only_archive));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nothing selected")
+        );
+    }
+
+    #[test]
+    fn space_can_still_tick_an_archive_row() {
+        let mut app = app();
+        app.begin_review(Pending::Changes(archive_change_set()));
+        app.review_cursor = 1;
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.review_selected[1]);
+    }
+
+    #[test]
+    fn m_uppercase_opens_the_manage_prompt() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.mode, Mode::AskingAgent(Verb::Manage));
+    }
+
+    #[test]
+    fn the_manage_prompt_needs_a_configured_service() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char('M'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no agent configured")
+        );
+    }
+
+    #[test]
+    fn archive_dirs_maps_each_groups_todo_file_to_its_archive() {
+        let app = app();
+        let map = app.archive_dirs();
+        for group in &app.workspace.groups {
+            match &group.archive_dir {
+                Some(dir) => assert_eq!(map.get(&group.todo_file), Some(dir)),
+                None => assert!(!map.contains_key(&group.todo_file)),
+            }
+        }
+    }
+
+    #[test]
+    fn esc_while_busy_requests_cancellation_and_clears_the_spinner() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.busy.is_none(), "the spinner goes away at once");
+        assert!(app.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cancelled")
+        );
+    }
+
+    // Without a fresh flag per call, one cancel would kill every later call.
+    #[test]
+    fn a_new_call_gets_an_uncancelled_flag() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        app = app.with_sender(sender);
+        app.spawn_agent(Verb::Summarize, String::new());
+        assert!(!app.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn esc_when_not_busy_still_clears_the_query() {
+        let mut app = app_with_services();
+        app.set_query("pri:P0").unwrap();
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.query_input, "");
+    }
+
+    #[test]
+    fn a_cancelled_calls_late_reply_does_not_reopen_a_modal() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        app.handle(Message::Event(Event::TaskFinished {
+            title: "manage failed".to_string(),
+            body: "claude: cancelled".to_string(),
+        }));
+        assert!(app.modal.is_none(), "the user already knows");
     }
 
     #[test]

@@ -138,6 +138,7 @@ Arrows work the list and the tree; `hjkl` moves between panes.
 | `z` `Z` | fold / fold all | `H` | hide done |
 | `/` `esc` | edit / clear query | `s` | git sync |
 | `v` | view settings | `c` | scrolling ticker |
+| `m` | pick model service | `M` | manage items with the agent |
 | `N` | read group notes | `X` | archive finished |
 | `?` | help | `q` | quit |
 
@@ -278,14 +279,47 @@ on.
 one, and it is not tied to any provider — anything that takes a prompt and
 prints JSON works.
 
+List the services you have; the picker chooses among them.
+
 ```toml
-[agent]
-command     = ["claude", "--print"]
-schema_flag = "--json-schema"
+[[services]]
+name         = "claude"
+command      = ["claude", "--print", "--dangerously-skip-permissions"]
+schema_mode  = "flag"                 # flag + the schema inline
+schema_flag  = "--json-schema"
+timeout_secs = 600
+
+[[services]]
+name        = "codex"
+command     = ["codex", "exec", "--json"]
+schema_mode = "file"                  # flag + a path to a temp file
+schema_flag = "--output-schema"
+
+[[services]]
+name        = "ollama"
+command     = ["ollama", "run", "qwen2.5:3b", "--format", "json"]
+schema_mode = "prompt"                # no flag; the schema goes in the prompt
 
 [agent.prompts]
 scan = "~/.config/mitodo/prompts/scan.md"   # your own prompt, kept local
+
+[ui]
+service = "claude"                    # the active one, remembered on exit
 ```
+
+`schema_mode` exists because these CLIs take a JSON schema three different
+ways: `claude` wants it inline behind `--json-schema`, `codex` wants a file path
+behind `--output-schema`, and `ollama` has no such flag at all — `--format json`
+buys valid JSON but not a particular shape, so the schema is stated in the
+prompt instead.
+
+`m` opens the picker, which lists the services by name; the active one shows in
+the top bar so you always know which model answered. The choice is remembered
+between runs. A prompt template is per *verb*, not per service — the `scan`
+instruction is the same whichever CLI runs it.
+
+An older config with a single `[agent] command = [...]` and no `[[services]]`
+keeps working untouched: it reads as one service named `default`.
 
 | key | verb | writes? |
 |---|---|---|
@@ -295,6 +329,8 @@ scan = "~/.config/mitodo/prompts/scan.md"   # your own prompt, kept local
 | `!` | carry out an instruction against the selected item | asks after |
 | `b` | break the selected item into sub-items | after review |
 | `R` | scan for changes across the workspace | after review |
+| `M` | tell the agent what to change, in words | after review |
+| `m` | pick which model service is active | no |
 
 Prompt templates get three placeholders: `{items}` is the view as rendered,
 `{item}` is just the selected item — its notes, deadline and sub-items — and
@@ -338,7 +374,14 @@ Anything that writes shows you the proposals first, as a list you pick from:
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Everything starts picked. `j`/`k` moves, `space` picks one, `a` toggles all,
+A proposal can `add`, `complete`, `update` or `archive`. `archive` moves the
+item into `<archive_dir>/TODO.md` exactly as `X` does — a move, not a delete —
+and unlike `X` it does not require the item to be finished first, since the
+point is to get something out of the working file. Those rows arrive **unticked**
+and say how much open work they would carry with them, so a move is opted into
+rather than opted out of.
+
+Everything else starts picked. `j`/`k` moves, `space` picks one, `a` toggles all,
 and clicking a row toggles it. **Apply** and **Cancel** are buttons you can
 click — Apply counts what is selected, so you can see what you are about to
 commit to — and `enter` and `esc` do the same. The highlighted change is shown

@@ -3,7 +3,7 @@
 //! The private `mcli todos scan` shells out to `claude --print` with a JSON
 //! schema and applies the change-set it gets back. Generalised, that is: run a
 //! configured command with a prompt, receive structured JSON, then render it or
-//! apply it after review. Four verbs share that one pipeline.
+//! apply it after review. Seven verbs share that one pipeline.
 //!
 //! The command is any binary that takes a prompt and emits JSON, so no provider
 //! is baked in and no email code enters this repository.
@@ -15,9 +15,13 @@ pub mod changeset;
 
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub use changeset::{Change, ChangeAction, ChangeSet};
+
+use crate::config::{SchemaMode, ServiceConfig};
 
 #[derive(thiserror::Error, Debug)]
 pub enum AgentError {
@@ -31,6 +35,8 @@ pub enum AgentError {
     BadJson(String),
     #[error("agent did not finish within {0}s")]
     TimedOut(u64),
+    #[error("cancelled")]
+    Cancelled,
 }
 
 /// What the agent is being asked to do.
@@ -49,6 +55,9 @@ pub enum Verb {
     Breakdown,
     /// Propose a change-set across the workspace. Writes, after review.
     Scan,
+    /// Carry out an instruction across the workspace as a change-set. Writes,
+    /// after review.
+    Manage,
 }
 
 impl Verb {
@@ -60,12 +69,13 @@ impl Verb {
             Verb::Act => "act",
             Verb::Breakdown => "breakdown",
             Verb::Scan => "scan",
+            Verb::Manage => "manage",
         }
     }
 
     /// Whether the result mutates the workspace, and so needs review.
     pub fn writes(self) -> bool {
-        matches!(self, Verb::Breakdown | Verb::Scan)
+        matches!(self, Verb::Breakdown | Verb::Scan | Verb::Manage)
     }
 
     /// JSON Schema the agent is asked to conform to.
@@ -83,7 +93,7 @@ impl Verb {
             Verb::Breakdown => {
                 r#"{"type":"object","properties":{"sub_items":{"type":"array","items":{"type":"string"}}},"required":["sub_items"]}"#
             }
-            Verb::Scan => changeset::SCAN_SCHEMA,
+            Verb::Scan | Verb::Manage => changeset::CHANGE_SCHEMA,
         }
     }
 
@@ -129,6 +139,16 @@ impl Verb {
                  Reply with JSON only. Each change names the file it belongs to, using the \
                  workspace-relative path exactly as shown below.\n\n{files}"
             }
+            Verb::Manage => {
+                "Carry out the instruction below against the todo files, as a change-set.\n\
+                 Use \"add\" for new items, \"complete\" for ones that are finished, \
+                 \"update\" to reword one, and \"archive\" to move one out of the working \
+                 file. Prefer \"archive\" over \"complete\" when the item should stop \
+                 appearing at all. Change nothing the instruction did not ask for.\n\n\
+                 Reply with JSON only. Each change names the file it belongs to, using the \
+                 workspace-relative path exactly as shown below, and gives a one-line \
+                 reason.\n\n{files}\n\nInstruction: {input}"
+            }
         }
     }
 }
@@ -147,28 +167,58 @@ pub fn render_prompt(template: &str, input: &str, items: &str, files: &str, item
         .replace("{item}", item)
 }
 
-/// Run the configured agent and return its raw stdout.
+/// Run a service and return its raw stdout.
 ///
 /// Blocking: callers put this on a dedicated thread so the UI keeps drawing.
+/// `cancel` is polled on the same tick as the child, so setting it kills the
+/// child rather than waiting out `timeout_secs`.
 pub fn run(
-    command: &[String],
-    schema_flag: Option<&str>,
+    service: &ServiceConfig,
     schema: &str,
     prompt: &str,
     cwd: &Path,
-    timeout_secs: u64,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<String, AgentError> {
-    let Some((program, leading)) = command.split_first() else {
+    let Some((program, leading)) = service.command.split_first() else {
         return Err(AgentError::NotConfigured);
     };
 
+    // Held for the whole call: dropping it removes the file, on every exit path.
+    let mut schema_file: Option<tempfile::NamedTempFile> = None;
+
     let mut cmd = Command::new(program);
     cmd.args(leading);
-    if let Some(flag) = schema_flag {
-        cmd.arg(flag).arg(schema);
-    }
-    cmd.arg(prompt)
+    let prompt = match service.schema_mode {
+        SchemaMode::Flag => {
+            if let Some(flag) = &service.schema_flag {
+                cmd.arg(flag).arg(schema);
+            }
+            prompt.to_string()
+        }
+        SchemaMode::File => {
+            let mut file = tempfile::Builder::new()
+                .prefix("mitodo-schema-")
+                .suffix(".json")
+                .tempfile()
+                .map_err(|err| AgentError::Spawn(program.clone(), err))?;
+            std::io::Write::write_all(&mut file, schema.as_bytes())
+                .map_err(|err| AgentError::Spawn(program.clone(), err))?;
+            if let Some(flag) = &service.schema_flag {
+                cmd.arg(flag).arg(file.path());
+            }
+            schema_file = Some(file);
+            prompt.to_string()
+        }
+        // `--format json` buys valid JSON, not the right shape, so say the shape.
+        SchemaMode::Prompt => {
+            format!("{prompt}\n\nReply with JSON matching this schema:\n{schema}")
+        }
+    };
+
+    cmd.arg(&prompt)
         .current_dir(cwd)
+        // Nested inside an agent session this makes the child see itself.
+        .env_remove("CLAUDECODE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -176,18 +226,23 @@ pub fn run(
         .spawn()
         .map_err(|err| AgentError::Spawn(program.clone(), err))?;
 
-    // Poll rather than block, so a wedged agent is killed instead of leaving
-    // the UI waiting on it for the rest of the session. The replies are small
-    // JSON documents, so the pipe buffer will not fill while we wait.
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    // Poll rather than block, so a wedged or unwanted agent is killed instead of
+    // leaving the UI waiting on it for the rest of the session. The replies are
+    // small JSON documents, so the pipe buffer will not fill while we wait.
+    let deadline = Instant::now() + Duration::from_secs(service.timeout_secs);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AgentError::Cancelled);
+                }
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(AgentError::TimedOut(timeout_secs));
+                    return Err(AgentError::TimedOut(service.timeout_secs));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -198,6 +253,7 @@ pub fn run(
     let output = child
         .wait_with_output()
         .map_err(|err| AgentError::Spawn(program.clone(), err))?;
+    drop(schema_file);
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -367,10 +423,50 @@ mod tests {
 
     #[test]
     fn every_verb_has_valid_json_schema() {
-        for verb in [Verb::Query, Verb::Summarize, Verb::Breakdown, Verb::Scan] {
+        for verb in [
+            Verb::Query,
+            Verb::Summarize,
+            Verb::Explain,
+            Verb::Act,
+            Verb::Breakdown,
+            Verb::Scan,
+            Verb::Manage,
+        ] {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(verb.schema());
             assert!(parsed.is_ok(), "{} schema is valid JSON", verb.label());
         }
+    }
+
+    #[test]
+    fn manage_writes_and_so_needs_review() {
+        assert!(Verb::Manage.writes());
+        assert_eq!(Verb::Manage.label(), "manage");
+    }
+
+    #[test]
+    fn manage_is_sent_both_the_instruction_and_the_files() {
+        let prompt = Verb::Manage.default_prompt();
+        assert!(prompt.contains("{input}"), "what the user asked for");
+        assert!(prompt.contains("{files}"), "a change names its file");
+        assert!(
+            !prompt.contains("{items}"),
+            "the rendered view is not enough"
+        );
+    }
+
+    #[test]
+    fn manage_and_scan_share_the_change_schema() {
+        assert_eq!(Verb::Manage.schema(), Verb::Scan.schema());
+    }
+
+    #[test]
+    fn the_change_schema_offers_archive_as_an_action() {
+        let schema: serde_json::Value = serde_json::from_str(Verb::Manage.schema()).unwrap();
+        let actions = schema["properties"]["changes"]["items"]["properties"]["action"]["enum"]
+            .as_array()
+            .expect("the action property is an enum");
+        let names: Vec<&str> = actions.iter().filter_map(|a| a.as_str()).collect();
+        assert_eq!(names, vec!["add", "complete", "update", "archive"]);
     }
 
     #[test]
@@ -451,58 +547,122 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runs_a_command_and_returns_stdout() {
+    fn service(command: &[&str], mode: SchemaMode, flag: Option<&str>) -> ServiceConfig {
+        ServiceConfig {
+            name: "test".to_string(),
+            command: command.iter().map(|s| s.to_string()).collect(),
+            schema_mode: mode,
+            schema_flag: flag.map(|f| f.to_string()),
+            timeout_secs: 30,
+        }
+    }
+
+    fn go(service: &ServiceConfig, prompt: &str) -> Result<String, AgentError> {
         let dir = tempfile::tempdir().unwrap();
-        let command = vec!["echo".to_string()];
-        let out = run(&command, None, "{}", "hello", dir.path(), 30).unwrap();
-        assert_eq!(out.trim(), "hello");
+        run(
+            service,
+            "{\"type\":\"object\"}",
+            prompt,
+            dir.path(),
+            &Arc::new(AtomicBool::new(false)),
+        )
     }
 
     #[test]
-    fn passes_the_schema_behind_the_configured_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = vec!["echo".to_string()];
-        let out = run(
-            &command,
-            Some("--schema"),
-            "SCHEMA",
-            "PROMPT",
-            dir.path(),
-            30,
-        )
-        .unwrap();
-        assert!(out.contains("--schema SCHEMA PROMPT"), "got {out:?}");
+    fn runs_a_command_and_returns_stdout() {
+        let out = go(&service(&["echo"], SchemaMode::Prompt, None), "hello").unwrap();
+        assert!(out.contains("hello"));
+    }
+
+    #[test]
+    fn flag_mode_passes_the_schema_inline_behind_the_flag() {
+        let svc = service(&["echo"], SchemaMode::Flag, Some("--json-schema"));
+        let out = go(&svc, "PROMPT").unwrap();
+        assert!(out.contains("--json-schema"), "got {out:?}");
+        assert!(out.contains("\"type\":\"object\""), "got {out:?}");
+        assert!(out.trim().ends_with("PROMPT"), "prompt comes last: {out:?}");
+    }
+
+    // codex takes `--output-schema <FILE>`, so the schema reaches it as a path.
+    #[test]
+    fn file_mode_passes_a_readable_path_behind_the_flag() {
+        let svc = service(
+            &["sh", "-c", r#"printf '%s' "$(cat "$2")""#, "sh"],
+            SchemaMode::File,
+            Some("--x"),
+        );
+        let out = go(&svc, "ignored").unwrap();
+        assert!(
+            out.contains("\"type\":\"object\""),
+            "the file held the schema: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_schema_file_is_gone_once_the_call_returns() {
+        let svc = service(
+            &["sh", "-c", r#"printf '%s' "$2""#, "sh"],
+            SchemaMode::File,
+            Some("--x"),
+        );
+        let printed = go(&svc, "ignored").unwrap();
+        let path = std::path::PathBuf::from(printed.trim());
+        assert!(
+            !path.exists(),
+            "temp schema outlived the call: {}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn prompt_mode_appends_the_schema_to_the_prompt_and_passes_no_flag() {
+        let svc = service(&["echo"], SchemaMode::Prompt, Some("--ignored"));
+        let out = go(&svc, "PROMPT").unwrap();
+        assert!(
+            !out.contains("--ignored"),
+            "prompt mode sends no flag: {out:?}"
+        );
+        assert!(out.contains("PROMPT"));
+        assert!(
+            out.contains("\"type\":\"object\""),
+            "schema is in the prompt: {out:?}"
+        );
+    }
+
+    // Nested inside a Claude Code session, the child sees itself running inside
+    // itself unless this is stripped.
+    #[test]
+    fn claudecode_is_stripped_from_the_child_environment() {
+        unsafe { std::env::set_var("CLAUDECODE", "1") };
+        let svc = service(&["sh", "-c", "env", "sh"], SchemaMode::Prompt, None);
+        let out = go(&svc, "ignored").unwrap();
+        unsafe { std::env::remove_var("CLAUDECODE") };
+        assert!(
+            !out.contains("CLAUDECODE"),
+            "leaked into the child: {out:?}"
+        );
     }
 
     #[test]
     fn an_empty_command_is_not_configured() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
-            run(&[], None, "{}", "p", dir.path(), 30),
-            Err(AgentError::NotConfigured)
-        ));
+        let svc = service(&[], SchemaMode::Flag, None);
+        assert!(matches!(go(&svc, "p"), Err(AgentError::NotConfigured)));
     }
 
     #[test]
     fn a_missing_program_is_reported() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = vec!["definitely-not-a-real-program".to_string()];
-        assert!(matches!(
-            run(&command, None, "{}", "p", dir.path(), 30),
-            Err(AgentError::Spawn(..))
-        ));
+        let svc = service(&["definitely-not-a-real-program"], SchemaMode::Prompt, None);
+        assert!(matches!(go(&svc, "p"), Err(AgentError::Spawn(..))));
     }
 
     #[test]
     fn a_nonzero_exit_is_reported_with_stderr() {
-        let dir = tempfile::tempdir().unwrap();
-        let command = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            "echo boom >&2; exit 2".to_string(),
-        ];
-        match run(&command, None, "{}", "ignored", dir.path(), 30) {
+        let svc = service(
+            &["sh", "-c", "echo boom >&2; exit 2"],
+            SchemaMode::Prompt,
+            None,
+        );
+        match go(&svc, "ignored") {
             Err(AgentError::Failed(_, stderr)) => assert!(stderr.contains("boom")),
             other => panic!("expected Failed, got {other:?}"),
         }
@@ -511,11 +671,16 @@ mod tests {
     #[test]
     fn a_wedged_agent_is_killed_rather_than_waited_on_forever() {
         let dir = tempfile::tempdir().unwrap();
-        // The prompt is appended as the last argument, so the command has to
-        // tolerate an extra one.
-        let command = vec!["sh".to_string(), "-c".to_string(), "sleep 60".to_string()];
+        let mut svc = service(&["sh", "-c", "sleep 60"], SchemaMode::Prompt, None);
+        svc.timeout_secs = 1;
         let started = std::time::Instant::now();
-        let result = run(&command, None, "{}", "ignored", dir.path(), 1);
+        let result = run(
+            &svc,
+            "{}",
+            "ignored",
+            dir.path(),
+            &Arc::new(AtomicBool::new(false)),
+        );
         assert!(matches!(result, Err(AgentError::TimedOut(1))), "{result:?}");
         assert!(
             started.elapsed() < Duration::from_secs(10),
@@ -524,10 +689,27 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_config_is_still_honoured_within_the_timeout() {
+    fn a_cancelled_call_kills_the_child_promptly() {
         let dir = tempfile::tempdir().unwrap();
-        let command = vec!["echo".to_string()];
-        assert!(run(&command, None, "{}", "quick", dir.path(), 30).is_ok());
+        let svc = service(&["sh", "-c", "sleep 60"], SchemaMode::Prompt, None);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            flag.store(true, Ordering::Relaxed);
+        });
+        let started = std::time::Instant::now();
+        let result = run(&svc, "{}", "ignored", dir.path(), &cancel);
+        assert!(matches!(result, Err(AgentError::Cancelled)), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "cancel is not a timeout wait"
+        );
+    }
+
+    #[test]
+    fn a_prompt_config_is_still_honoured_within_the_timeout() {
+        assert!(go(&service(&["echo"], SchemaMode::Prompt, None), "quick").is_ok());
     }
 
     #[test]
