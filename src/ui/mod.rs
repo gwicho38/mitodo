@@ -351,6 +351,9 @@ pub struct App {
     pub review_scroll: usize,
     /// The background task in flight, if any.
     pub busy: Option<Busy>,
+    /// Set to stop the agent call in flight. A fresh flag per call, so
+    /// cancelling one does not kill the next.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Scrolling ticker, when enabled.
     pub ticker: Option<TickerState>,
     /// Wrap long item text instead of truncating it.
@@ -427,6 +430,7 @@ impl App {
             review_cursor: 0,
             review_scroll: 0,
             busy: None,
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ticker,
             wrap: config_wrap,
             collapsed: std::collections::HashSet::new(),
@@ -697,6 +701,10 @@ impl App {
                 }
             }
             Message::Event(Event::TaskFinished { title, body }) => {
+                // A cancelled call still reports back; the user already knows.
+                if self.busy.is_none() && body.trim_end().ends_with("cancelled") {
+                    return;
+                }
                 self.busy = None;
                 self.open_modal(&title, body.lines().map(|l| l.to_string()).collect());
             }
@@ -1013,6 +1021,15 @@ impl App {
             K::Char(' ') | K::Enter => self.toggle_view_setting(ViewSetting::ALL[self.view_cursor]),
             _ => {}
         }
+    }
+
+    /// Stop the agent call in flight. The spinner clears at once rather than
+    /// waiting for the thread, so the UI never looks stuck.
+    fn cancel_agent(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let label = self.busy.take().map(|b| b.label).unwrap_or_default();
+        self.notice = Some(format!("{label} cancelled"));
     }
 
     fn open_service_menu(&mut self) {
@@ -1337,7 +1354,13 @@ impl App {
                 self.mode = Mode::EditingQuery;
                 self.query_error = None;
             }
-            (K::Esc, _) => self.clear_query(),
+            (K::Esc, _) => {
+                if self.busy.is_some() {
+                    self.cancel_agent();
+                } else {
+                    self.clear_query();
+                }
+            }
             (K::Char('q'), KeyModifiers::NONE) => self.should_quit = true,
             (K::Char('c'), KeyModifiers::CONTROL) => self.should_quit = true,
 
@@ -2088,6 +2111,7 @@ impl App {
         );
         let root = self.workspace.root.clone();
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel = cancel.clone();
 
         self.busy = Some(Busy::new(verb.label()));
         std::thread::spawn(move || {
@@ -2509,6 +2533,53 @@ mod tests {
                 None => assert!(!map.contains_key(&group.todo_file)),
             }
         }
+    }
+
+    #[test]
+    fn esc_while_busy_requests_cancellation_and_clears_the_spinner() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.busy.is_none(), "the spinner goes away at once");
+        assert!(app.cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            app.notice
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cancelled")
+        );
+    }
+
+    // Without a fresh flag per call, one cancel would kill every later call.
+    #[test]
+    fn a_new_call_gets_an_uncancelled_flag() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        app = app.with_sender(sender);
+        app.spawn_agent(Verb::Summarize, String::new());
+        assert!(!app.cancel.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn esc_when_not_busy_still_clears_the_query() {
+        let mut app = app_with_services();
+        app.set_query("pri:P0").unwrap();
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.query_input, "");
+    }
+
+    #[test]
+    fn a_cancelled_calls_late_reply_does_not_reopen_a_modal() {
+        let mut app = app_with_services();
+        app.busy = Some(Busy::new("manage"));
+        press(&mut app, KeyCode::Esc);
+        app.handle(Message::Event(Event::TaskFinished {
+            title: "manage failed".to_string(),
+            body: "claude: cancelled".to_string(),
+        }));
+        assert!(app.modal.is_none(), "the user already knows");
     }
 
     #[test]
