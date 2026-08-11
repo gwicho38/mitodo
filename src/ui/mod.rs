@@ -1832,8 +1832,8 @@ impl App {
     }
 
     fn begin_ask(&mut self, verb: Verb) {
-        if self.config.agent.command.is_empty() {
-            self.notice = Some("no agent configured (set [agent] command)".to_string());
+        if self.config.active_service().service.is_none() {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
             return;
         }
         self.edit_buffer.clear();
@@ -1959,10 +1959,12 @@ impl App {
     }
 
     fn spawn_agent(&mut self, verb: Verb, input: String) {
-        if self.config.agent.command.is_empty() {
-            self.notice = Some("no agent configured (set [agent] command)".to_string());
+        // Before the sender check: an unconfigured agent is worth reporting even
+        // when there is no channel to run one on.
+        let Some(service) = self.config.active_service().service else {
+            self.notice = Some("no agent configured (set [[services]])".to_string());
             return;
-        }
+        };
         let Some(sender) = self.sender.clone() else {
             return;
         };
@@ -1973,25 +1975,16 @@ impl App {
             &self.files_context(),
             &self.item_context(),
         );
-        let command = self.config.agent.command.clone();
-        let schema_flag = self.config.agent.schema_flag.clone();
-        let timeout = self.config.agent.timeout_secs;
         let root = self.workspace.root.clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         self.busy = Some(Busy::new(verb.label()));
         std::thread::spawn(move || {
-            let result = agent::run(
-                &command,
-                schema_flag.as_deref(),
-                verb.schema(),
-                &prompt,
-                &root,
-                timeout,
-            );
+            let result = agent::run(&service, verb.schema(), &prompt, &root, &cancel);
             let event = match result {
                 Err(err) => Event::TaskFinished {
                     title: format!("{} failed", verb.label()),
-                    body: err.to_string(),
+                    body: format!("{}: {err}", service.name),
                 },
                 Ok(json) => interpret(verb, &json),
             };
