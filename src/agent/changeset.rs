@@ -10,8 +10,8 @@ use serde::Deserialize;
 
 use crate::store::{self, Item, WriteError};
 
-/// Schema handed to the agent for the `scan` verb.
-pub const SCAN_SCHEMA: &str = r#"{"type":"object","properties":{"changes":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"action":{"type":"string","enum":["add","complete","update"]},"section":{"type":"string"},"heading":{"type":"string"},"content":{"type":"string"},"reason":{"type":"string"}},"required":["file","action","content","reason"]}},"summary":{"type":"string"}},"required":["changes","summary"]}"#;
+/// Schema handed to the agent for the change-set verbs.
+pub const CHANGE_SCHEMA: &str = r#"{"type":"object","properties":{"changes":{"type":"array","items":{"type":"object","properties":{"file":{"type":"string"},"action":{"type":"string","enum":["add","complete","update","archive"]},"section":{"type":"string"},"heading":{"type":"string"},"content":{"type":"string"},"reason":{"type":"string"}},"required":["file","action","content","reason"]}},"summary":{"type":"string"}},"required":["changes","summary"]}"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]

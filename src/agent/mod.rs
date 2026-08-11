@@ -3,7 +3,7 @@
 //! The private `mcli todos scan` shells out to `claude --print` with a JSON
 //! schema and applies the change-set it gets back. Generalised, that is: run a
 //! configured command with a prompt, receive structured JSON, then render it or
-//! apply it after review. Four verbs share that one pipeline.
+//! apply it after review. Seven verbs share that one pipeline.
 //!
 //! The command is any binary that takes a prompt and emits JSON, so no provider
 //! is baked in and no email code enters this repository.
@@ -55,6 +55,9 @@ pub enum Verb {
     Breakdown,
     /// Propose a change-set across the workspace. Writes, after review.
     Scan,
+    /// Carry out an instruction across the workspace as a change-set. Writes,
+    /// after review.
+    Manage,
 }
 
 impl Verb {
@@ -66,12 +69,13 @@ impl Verb {
             Verb::Act => "act",
             Verb::Breakdown => "breakdown",
             Verb::Scan => "scan",
+            Verb::Manage => "manage",
         }
     }
 
     /// Whether the result mutates the workspace, and so needs review.
     pub fn writes(self) -> bool {
-        matches!(self, Verb::Breakdown | Verb::Scan)
+        matches!(self, Verb::Breakdown | Verb::Scan | Verb::Manage)
     }
 
     /// JSON Schema the agent is asked to conform to.
@@ -89,7 +93,7 @@ impl Verb {
             Verb::Breakdown => {
                 r#"{"type":"object","properties":{"sub_items":{"type":"array","items":{"type":"string"}}},"required":["sub_items"]}"#
             }
-            Verb::Scan => changeset::SCAN_SCHEMA,
+            Verb::Scan | Verb::Manage => changeset::CHANGE_SCHEMA,
         }
     }
 
@@ -134,6 +138,16 @@ impl Verb {
                  2. Identify existing unchecked items that have since been resolved.\n\n\
                  Reply with JSON only. Each change names the file it belongs to, using the \
                  workspace-relative path exactly as shown below.\n\n{files}"
+            }
+            Verb::Manage => {
+                "Carry out the instruction below against the todo files, as a change-set.\n\
+                 Use \"add\" for new items, \"complete\" for ones that are finished, \
+                 \"update\" to reword one, and \"archive\" to move one out of the working \
+                 file. Prefer \"archive\" over \"complete\" when the item should stop \
+                 appearing at all. Change nothing the instruction did not ask for.\n\n\
+                 Reply with JSON only. Each change names the file it belongs to, using the \
+                 workspace-relative path exactly as shown below, and gives a one-line \
+                 reason.\n\n{files}\n\nInstruction: {input}"
             }
         }
     }
@@ -409,10 +423,50 @@ mod tests {
 
     #[test]
     fn every_verb_has_valid_json_schema() {
-        for verb in [Verb::Query, Verb::Summarize, Verb::Breakdown, Verb::Scan] {
+        for verb in [
+            Verb::Query,
+            Verb::Summarize,
+            Verb::Explain,
+            Verb::Act,
+            Verb::Breakdown,
+            Verb::Scan,
+            Verb::Manage,
+        ] {
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(verb.schema());
             assert!(parsed.is_ok(), "{} schema is valid JSON", verb.label());
         }
+    }
+
+    #[test]
+    fn manage_writes_and_so_needs_review() {
+        assert!(Verb::Manage.writes());
+        assert_eq!(Verb::Manage.label(), "manage");
+    }
+
+    #[test]
+    fn manage_is_sent_both_the_instruction_and_the_files() {
+        let prompt = Verb::Manage.default_prompt();
+        assert!(prompt.contains("{input}"), "what the user asked for");
+        assert!(prompt.contains("{files}"), "a change names its file");
+        assert!(
+            !prompt.contains("{items}"),
+            "the rendered view is not enough"
+        );
+    }
+
+    #[test]
+    fn manage_and_scan_share_the_change_schema() {
+        assert_eq!(Verb::Manage.schema(), Verb::Scan.schema());
+    }
+
+    #[test]
+    fn the_change_schema_offers_archive_as_an_action() {
+        let schema: serde_json::Value = serde_json::from_str(Verb::Manage.schema()).unwrap();
+        let actions = schema["properties"]["changes"]["items"]["properties"]["action"]["enum"]
+            .as_array()
+            .expect("the action property is an enum");
+        let names: Vec<&str> = actions.iter().filter_map(|a| a.as_str()).collect();
+        assert_eq!(names, vec!["add", "complete", "update", "archive"]);
     }
 
     #[test]

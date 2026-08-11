@@ -2030,7 +2030,7 @@ fn interpret(verb: Verb, json: &str) -> Event {
             Ok(items) => Event::SubItemsProposed(items),
             Err(err) => fail(verb, err.to_string()),
         },
-        Verb::Scan => match ChangeSet::parse(json) {
+        Verb::Scan | Verb::Manage => match ChangeSet::parse(json) {
             Ok(set) => Event::ChangeSetProposed(set),
             Err(err) => fail(verb, err.to_string()),
         },
