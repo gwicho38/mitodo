@@ -455,6 +455,7 @@ impl App {
             // Not a view toggle; preserve whatever the user configured.
             mouse: self.config.ui.mouse,
             wrap: self.wrap,
+            service: self.config.ui.service.clone(),
         };
         if current == self.config.ui {
             return;

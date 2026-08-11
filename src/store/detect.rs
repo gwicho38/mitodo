@@ -162,6 +162,7 @@ pub fn detect(root: &Path) -> Result<Detection, DetectError> {
             priority,
             git,
             agent: Default::default(),
+            service_list: Vec::new(),
             ui: Default::default(),
             due,
         },

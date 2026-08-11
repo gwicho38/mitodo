@@ -30,6 +30,8 @@ pub struct Config {
     /// leave an empty section that a later append would duplicate.
     #[serde(default, skip_serializing_if = "AgentConfig::is_disabled")]
     pub agent: AgentConfig,
+    #[serde(default, rename = "services", skip_serializing_if = "Vec::is_empty")]
+    pub service_list: Vec<ServiceConfig>,
     #[serde(default)]
     pub ui: UiConfig,
     #[serde(default)]
@@ -37,7 +39,7 @@ pub struct Config {
 }
 
 /// View state that survives a restart, the way `mcli todos` remembered it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiConfig {
     #[serde(default)]
     pub hide_done: bool,
@@ -50,6 +52,9 @@ pub struct UiConfig {
     /// Wrap long item text across several rows instead of truncating it.
     #[serde(default)]
     pub wrap: bool,
+    /// Which service the picker last selected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
 }
 
 fn yes() -> bool {
@@ -67,6 +72,7 @@ impl Default for UiConfig {
             ticker: false,
             mouse: true,
             wrap: false,
+            service: None,
         }
     }
 }
@@ -116,6 +122,39 @@ pub enum PrioritySource {
     Tag,
     #[default]
     None,
+}
+
+/// How a service is handed the JSON schema it must answer in.
+///
+/// claude takes it inline, codex takes a file path, ollama takes neither and
+/// needs it stated in the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SchemaMode {
+    #[default]
+    Flag,
+    File,
+    Prompt,
+}
+
+/// One model service: a CLI that takes a prompt and emits JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceConfig {
+    pub name: String,
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub schema_mode: SchemaMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_flag: Option<String>,
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+}
+
+/// The service in force, plus anything the user should be told about resolving it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ActiveService {
+    pub service: Option<ServiceConfig>,
+    pub notice: Option<String>,
 }
 
 /// How to invoke an external agent. Any binary that takes a prompt and emits
@@ -184,6 +223,53 @@ impl Config {
             .map(|(verb, path)| Ok((verb.clone(), expand_tilde(path)?)))
             .collect::<Result<_, ConfigError>>()?;
         Ok(config)
+    }
+
+    /// Every configured service, in config order.
+    ///
+    /// A config predating `[[services]]` still has `[agent]`; it reads as one
+    /// service so an existing setup keeps working unedited.
+    pub fn services(&self) -> Vec<ServiceConfig> {
+        if !self.service_list.is_empty() {
+            return self.service_list.clone();
+        }
+        if self.agent.is_disabled() {
+            return Vec::new();
+        }
+        vec![ServiceConfig {
+            name: "default".to_string(),
+            command: self.agent.command.clone(),
+            schema_mode: SchemaMode::Flag,
+            schema_flag: self.agent.schema_flag.clone(),
+            timeout_secs: self.agent.timeout_secs,
+        }]
+    }
+
+    /// The service `ui.service` names, else the first one.
+    pub fn active_service(&self) -> ActiveService {
+        let services = self.services();
+        let Some(first) = services.first() else {
+            return ActiveService::default();
+        };
+        match &self.ui.service {
+            None => ActiveService {
+                service: Some(first.clone()),
+                notice: None,
+            },
+            Some(wanted) => match services.iter().find(|s| &s.name == wanted) {
+                Some(found) => ActiveService {
+                    service: Some(found.clone()),
+                    notice: None,
+                },
+                None => ActiveService {
+                    service: Some(first.clone()),
+                    notice: Some(format!(
+                        "service {:?} not in config — using {}",
+                        wanted, first.name
+                    )),
+                },
+            },
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
@@ -255,6 +341,115 @@ pattern = "^P([0-3])"
 enabled = true
 sync    = [["add", "-A"], ["commit", "-m", "mitodo: sync"]]
 "#;
+
+    const THREE_SERVICES: &str = r#"
+[workspace]
+root      = "/tmp/w"
+group_by  = "directory"
+todo_glob = "*/TODO.md"
+
+[[services]]
+name         = "claude"
+command      = ["claude", "--print"]
+schema_mode  = "flag"
+schema_flag  = "--json-schema"
+timeout_secs = 600
+
+[[services]]
+name         = "codex"
+command      = ["codex", "exec", "--json"]
+schema_mode  = "file"
+schema_flag  = "--output-schema"
+
+[[services]]
+name        = "ollama"
+command     = ["ollama", "run", "qwen2.5:3b", "--format", "json"]
+schema_mode = "prompt"
+
+[ui]
+service = "codex"
+"#;
+
+    #[test]
+    fn three_services_parse_in_config_order() {
+        let cfg: Config = toml::from_str(THREE_SERVICES).unwrap();
+        let services = cfg.services();
+        let names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["claude", "codex", "ollama"]);
+        assert_eq!(services[1].schema_mode, SchemaMode::File);
+        assert_eq!(services[2].schema_flag, None);
+    }
+
+    #[test]
+    fn a_service_without_a_timeout_gets_the_default() {
+        let cfg: Config = toml::from_str(THREE_SERVICES).unwrap();
+        assert_eq!(cfg.services()[1].timeout_secs, default_timeout());
+    }
+
+    #[test]
+    fn ui_service_selects_which_one_is_active() {
+        let cfg: Config = toml::from_str(THREE_SERVICES).unwrap();
+        let active = cfg.active_service();
+        assert_eq!(active.service.unwrap().name, "codex");
+        assert_eq!(active.notice, None);
+    }
+
+    // A config shared between machines can name a service the other one lacks;
+    // opening the workspace must not depend on the agent being resolvable.
+    #[test]
+    fn an_unknown_ui_service_falls_back_to_the_first_with_a_notice() {
+        let text = THREE_SERVICES.replace(r#"service = "codex""#, r#"service = "gpt5""#);
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let active = cfg.active_service();
+        assert_eq!(active.service.unwrap().name, "claude");
+        let notice = active.notice.expect("a notice explains the fallback");
+        assert!(notice.contains("gpt5") && notice.contains("claude"), "{notice}");
+    }
+
+    #[test]
+    fn no_ui_service_means_the_first_one() {
+        let text = THREE_SERVICES.replace("[ui]\nservice = \"codex\"\n", "");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.active_service().service.unwrap().name, "claude");
+    }
+
+    #[test]
+    fn a_legacy_agent_section_becomes_one_service_named_default() {
+        let legacy = format!(
+            "{SAMPLE}\n[agent]\ncommand = [\"claude\", \"--print\"]\nschema_flag = \"--json-schema\"\ntimeout_secs = 42\n"
+        );
+        let cfg: Config = toml::from_str(&legacy).unwrap();
+        let services = cfg.services();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].name, "default");
+        assert_eq!(services[0].command, vec!["claude", "--print"]);
+        assert_eq!(services[0].schema_flag.as_deref(), Some("--json-schema"));
+        assert_eq!(services[0].schema_mode, SchemaMode::Flag);
+        assert_eq!(services[0].timeout_secs, 42);
+        assert_eq!(cfg.active_service().service.unwrap().name, "default");
+    }
+
+    #[test]
+    fn services_win_over_a_legacy_agent_section() {
+        let both = format!("{THREE_SERVICES}\n[agent]\ncommand = [\"old\"]\n");
+        let cfg: Config = toml::from_str(&both).unwrap();
+        assert_eq!(cfg.services().len(), 3);
+    }
+
+    #[test]
+    fn no_services_and_no_agent_means_none_active() {
+        let cfg: Config = toml::from_str(SAMPLE).unwrap();
+        assert!(cfg.services().is_empty());
+        assert!(cfg.active_service().service.is_none());
+    }
+
+    #[test]
+    fn a_service_list_round_trips_through_toml() {
+        let cfg: Config = toml::from_str(THREE_SERVICES).unwrap();
+        let rendered = toml::to_string_pretty(&cfg).unwrap();
+        let again: Config = toml::from_str(&rendered).unwrap();
+        assert_eq!(cfg, again);
+    }
 
     #[test]
     fn the_config_path_is_xdg_on_every_platform() {
