@@ -1,53 +1,19 @@
 { lib
 , rustPlatform
-, pkg-config
-, cmake
-, perl
-, openssl
-, libxml2
-, sqlite
-, glib
-, glibc
-, llvmPackages_19
 }:
 
 rustPlatform.buildRustPackage {
   pname = "mitodo";
-  version = "1.1.0";
-  
+  version = (lib.importTOML ../Cargo.toml).package.version;
+
   src = ../.;
-  
+
   cargoLock = {
     lockFile = ../Cargo.lock;
   };
-  
-  nativeBuildInputs = [
-    pkg-config
-    cmake
-    perl  
-  ];
-  
-  buildInputs = [
-    openssl
-    libxml2
-    sqlite
-  ];
-  
-  LIBCLANG_PATH = lib.makeLibraryPath [ llvmPackages_19.libclang.lib ];
-  BINDGEN_EXTRA_CLANG_ARGS = lib.concatStringsSep " " (
-    (builtins.map (a: ''-I"${a}/include"'') [
-      glibc.dev
-    ])
-    ++ [
-      ''-I"${llvmPackages_19.libclang.lib}/lib/clang/19/include"''
-      ''-I"${glib.dev}/include/glib-2.0"''
-      ''-I${glib.out}/lib/glib-2.0/include/''
-      ''-I"${glibc.dev}/include/"''
-    ]
-  );
-  
+
   meta = with lib; {
-    description = "A feature-rich TUI RSS Reader based on the news-flash library";
+    description = "a TUI todo tracker over plain markdown checklists";
     homepage = "https://github.com/gwicho38/mitodo";
     license = licenses.gpl3Plus;
     maintainers = [ "gwicho38" ];
