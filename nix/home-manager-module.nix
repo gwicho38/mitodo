@@ -10,7 +10,7 @@ in {
   meta.maintainers = [ "gwicho38" ];
 
   options.programs.mitodo = {
-    enable = mkEnableOption "mitodo, a feature-rich TUI RSS reader";
+    enable = mkEnableOption "mitodo, a TUI todo tracker over plain markdown checklists";
 
     package = mkOption {
       type = types.package;

@@ -177,6 +177,12 @@ impl Config {
         let text = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&text)?;
         config.workspace.root = expand_tilde(&config.workspace.root)?;
+        config.agent.prompts = config
+            .agent
+            .prompts
+            .iter()
+            .map(|(verb, path)| Ok((verb.clone(), expand_tilde(path)?)))
+            .collect::<Result<_, ConfigError>>()?;
         Ok(config)
     }
 
@@ -376,6 +382,24 @@ todo_glob = "TODO.md"
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert!(!cfg.workspace.root.to_string_lossy().starts_with('~'));
+    }
+
+    // A literal `~` here reads as missing and silently falls back to the
+    // built-in prompt, so one config shared across machines would behave
+    // differently on each.
+    #[test]
+    fn tilde_in_a_prompt_path_is_expanded_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[workspace]\nroot = \"/tmp/w\"\ngroup_by = \"directory\"\ntodo_glob = \"*/TODO.md\"\n\n[agent]\ncommand = [\"claude\"]\n\n[agent.prompts]\nscan = \"~/.config/mitodo/prompts/scan.md\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let scan = cfg.agent.prompts.get("scan").unwrap().to_string_lossy();
+        assert!(!scan.starts_with('~'), "unexpanded prompt path: {scan}");
+        assert!(scan.ends_with("/.config/mitodo/prompts/scan.md"));
     }
 }
 

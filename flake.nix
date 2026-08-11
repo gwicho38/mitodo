@@ -1,5 +1,5 @@
 {
-  description = "A feature-rich TUI RSS Reader based on the news-flash library";
+  description = "a TUI todo tracker over plain markdown checklists";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -9,9 +9,7 @@
   outputs = { self, nixpkgs, flake-utils, ... }:
     {
       overlays.default = final: prev: {
-        mitodo = final.callPackage ./nix/package.nix {
-          inherit (final) llvmPackages_19;
-        };
+        mitodo = final.callPackage ./nix/package.nix { };
       };
       
       homeManager.default = import ./nix/home-manager-module.nix;
@@ -25,9 +23,7 @@
       in
       {
         packages = {
-          mitodo = pkgs.callPackage ./nix/package.nix {
-            inherit (pkgs) llvmPackages_19;
-          };
+          mitodo = pkgs.callPackage ./nix/package.nix { };
           default = self.outputs.packages.${system}.mitodo;
         };
 
