@@ -1134,8 +1134,14 @@ impl App {
         let (applied, skipped) = match pending {
             Pending::Changes(set) => {
                 let picked = set.selected(&self.review_selected);
-                let report =
-                    agent::changeset::apply(&self.workspace.root, &self.workspace.items, &picked);
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                let report = agent::changeset::apply(
+                    &self.workspace.root,
+                    &self.archive_dirs(),
+                    &today,
+                    &self.workspace.items,
+                    &picked,
+                );
                 (report.applied, report.skipped)
             }
             Pending::SubItems { parent, lines } => self.apply_sub_items(&parent, &lines),
@@ -1749,6 +1755,16 @@ impl App {
                     Some("select a group with an archive directory configured".to_string())
             }
         }
+    }
+
+    /// Each group's todo file mapped to its archive directory, for change-sets
+    /// that span groups.
+    pub fn archive_dirs(&self) -> std::collections::HashMap<PathBuf, PathBuf> {
+        self.workspace
+            .groups
+            .iter()
+            .filter_map(|g| g.archive_dir.clone().map(|dir| (g.todo_file.clone(), dir)))
+            .collect()
     }
 
     /// The selected group's todo and archive paths, if archiving is possible.

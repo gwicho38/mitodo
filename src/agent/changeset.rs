@@ -4,6 +4,7 @@
 //! existing prompt keeps working, but every change is reviewed before it
 //! touches a file, and applying goes through the conflict-aware writer.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -19,6 +20,7 @@ pub enum ChangeAction {
     Add,
     Complete,
     Update,
+    Archive,
 }
 
 impl ChangeAction {
@@ -27,6 +29,7 @@ impl ChangeAction {
             ChangeAction::Add => "+ add",
             ChangeAction::Complete => "✓ done",
             ChangeAction::Update => "~ edit",
+            ChangeAction::Archive => "→ archive",
         }
     }
 }
@@ -80,6 +83,27 @@ impl ChangeSet {
             .unwrap_or_default()
     }
 
+    /// How many unfinished sub-items an archive change would carry out of the
+    /// working file. Zero for every other action.
+    pub fn open_sub_items(&self, index: usize, items: &[Item]) -> usize {
+        let Some(change) = self.changes.get(index) else {
+            return 0;
+        };
+        if change.action != ChangeAction::Archive {
+            return 0;
+        }
+        let Some(parent) = items
+            .iter()
+            .find(|i| i.text.trim().eq_ignore_ascii_case(change.content.trim()))
+        else {
+            return 0;
+        };
+        items
+            .iter()
+            .filter(|i| i.parent.as_ref() == Some(&parent.id) && !i.done)
+            .count()
+    }
+
     /// A copy carrying only the changes at the given positions.
     pub fn selected(&self, keep: &[bool]) -> ChangeSet {
         ChangeSet {
@@ -103,11 +127,20 @@ pub struct ApplyReport {
 
 /// Apply a reviewed change-set.
 ///
-/// `complete` and `update` locate their target by matching item text within the
-/// named file, so a change-set stays valid even if line numbers moved since the
-/// agent read the workspace. Anything that cannot be located is skipped and
-/// reported rather than guessed at.
-pub fn apply(root: &Path, items: &[Item], set: &ChangeSet) -> ApplyReport {
+/// `complete`, `update` and `archive` locate their target by matching item text
+/// within the named file, so a change-set stays valid even if line numbers moved
+/// since the agent read the workspace. Anything that cannot be located is
+/// skipped and reported rather than guessed at.
+///
+/// `archive_dirs` maps a todo file to its group's archive directory; a file
+/// missing from it has none configured.
+pub fn apply(
+    root: &Path,
+    archive_dirs: &HashMap<PathBuf, PathBuf>,
+    today: &str,
+    items: &[Item],
+    set: &ChangeSet,
+) -> ApplyReport {
     let mut report = ApplyReport::default();
 
     for change in &set.changes {
@@ -116,6 +149,7 @@ pub fn apply(root: &Path, items: &[Item], set: &ChangeSet) -> ApplyReport {
             ChangeAction::Add => apply_add(&path, items, change),
             ChangeAction::Complete => apply_complete(&path, items, change),
             ChangeAction::Update => apply_update(&path, items, change),
+            ChangeAction::Archive => apply_archive(&path, archive_dirs, today, items, change),
         };
         match result {
             Ok(()) => report.applied += 1,
@@ -173,6 +207,31 @@ fn apply_update(path: &Path, items: &[Item], change: &Change) -> Result<(), Stri
     store::edit_text(path, item.line, &item.raw, text).map_err(|e| describe(e, "update", text))
 }
 
+fn apply_archive(
+    path: &Path,
+    archive_dirs: &HashMap<PathBuf, PathBuf>,
+    today: &str,
+    items: &[Item],
+    change: &Change,
+) -> Result<(), String> {
+    let Some(item) = find(items, path, &change.content) else {
+        return Err(format!("archive {:?}: no matching item", change.content));
+    };
+    let Some(archive_dir) = archive_dirs.get(path) else {
+        return Err(format!(
+            "archive {:?}: no archive_dir configured for {}",
+            item.text,
+            path.display()
+        ));
+    };
+    let report = store::archive_items(path, archive_dir, &[item], today)
+        .map_err(|e| describe(e, "archive", &item.text))?;
+    match report.skipped.first() {
+        Some(reason) => Err(format!("archive {:?}: {reason}", item.text)),
+        None => Ok(()),
+    }
+}
+
 fn describe(err: WriteError, what: &str, text: &str) -> String {
     match err {
         WriteError::Conflict { .. } => {
@@ -206,6 +265,102 @@ mod tests {
 
     fn set(json: &str) -> ChangeSet {
         ChangeSet::parse(json).expect("change-set parses")
+    }
+
+    fn archive_map(todo: &Path, dir: &Path) -> HashMap<PathBuf, PathBuf> {
+        HashMap::from([(todo.to_path_buf(), dir.to_path_buf())])
+    }
+
+    #[test]
+    fn archive_parses_as_an_action() {
+        let parsed = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"alpha","reason":"closed"}]}"#);
+        assert_eq!(parsed.changes[0].action, ChangeAction::Archive);
+        assert_eq!(ChangeAction::Archive.glyph(), "\u{2192} archive");
+    }
+
+    #[test]
+    fn applying_an_archive_change_moves_the_item_out_of_the_file() {
+        let (dir, path, items) = workspace(DOC);
+        let archive = dir.path().join("_archive");
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"alpha","reason":"closed"}]}"#);
+
+        let report = apply(
+            dir.path(),
+            &archive_map(&path, &archive),
+            "2026-08-11",
+            &items,
+            &changes,
+        );
+        assert_eq!(report.applied, 1, "{:?}", report.skipped);
+
+        let left = std::fs::read_to_string(&path).unwrap();
+        assert!(!left.contains("alpha"), "{left}");
+        assert!(left.contains("beta"), "sibling untouched: {left}");
+        let moved = std::fs::read_to_string(archive.join("TODO.md")).unwrap();
+        assert!(
+            moved.contains("alpha") && moved.contains("2026-08-11"),
+            "{moved}"
+        );
+    }
+
+    #[test]
+    fn an_archive_change_naming_no_item_is_skipped() {
+        let (dir, path, items) = workspace(DOC);
+        let archive = dir.path().join("_archive");
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"nothing like this","reason":"r"}]}"#);
+
+        let report = apply(
+            dir.path(),
+            &archive_map(&path, &archive),
+            "2026-08-11",
+            &items,
+            &changes,
+        );
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].contains("no matching item"),
+            "{:?}",
+            report.skipped
+        );
+    }
+
+    // The rest of a change-set is still worth applying when archiving cannot run.
+    #[test]
+    fn without_an_archive_dir_the_archive_is_skipped_and_the_rest_applies() {
+        let (dir, _path, items) = workspace(DOC);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"alpha","reason":"r"},
+            {"file":"lefv.md","action":"complete","content":"alpha","reason":"r"}]}"#);
+
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
+        assert_eq!(report.applied, 1, "the complete still ran");
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].contains("no archive_dir configured"),
+            "{:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn an_archive_row_reports_how_much_open_work_it_carries() {
+        let body = "## P0\n\n- [ ] parent\n  - [ ] one\n  - [x] two\n";
+        let (_dir, _path, items) = workspace(body);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"archive","content":"parent","reason":"r"}]}"#);
+        assert_eq!(changes.open_sub_items(0, &items), 1);
+    }
+
+    #[test]
+    fn a_non_archive_row_carries_no_open_sub_item_count() {
+        let (_dir, _path, items) = workspace(DOC);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"complete","content":"alpha","reason":"r"}]}"#);
+        assert_eq!(changes.open_sub_items(0, &items), 0);
     }
 
     #[test]
@@ -275,7 +430,7 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"add",
                 "content":"- [ ] gamma","reason":"r"}]}"#,
         );
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 1);
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -290,7 +445,10 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"complete",
                 "content":"alpha","reason":"r"}]}"#,
         );
-        assert_eq!(apply(dir.path(), &items, &changes).applied, 1);
+        assert_eq!(
+            apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes).applied,
+            1
+        );
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
@@ -305,7 +463,7 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"complete",
                 "content":"beta","reason":"r"}]}"#,
         );
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 1);
         assert!(report.skipped.is_empty());
     }
@@ -318,7 +476,10 @@ mod tests {
                 "content":"alpha, revised","reason":"r"}]}"#,
         );
         // "alpha, revised" contains "alpha", so it locates the existing item.
-        assert_eq!(apply(dir.path(), &items, &changes).applied, 1);
+        assert_eq!(
+            apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes).applied,
+            1
+        );
         assert!(
             std::fs::read_to_string(&path)
                 .unwrap()
@@ -334,7 +495,7 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"complete",
                 "content":"nothing like this","reason":"r"}]}"#,
         );
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 0);
         assert_eq!(report.skipped.len(), 1);
         assert!(report.skipped[0].contains("no matching item"));
@@ -359,7 +520,7 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"complete",
                 "content":"alpha","reason":"r"}]}"#,
         );
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 0);
         assert!(
             report.skipped[0].contains("changed on disk"),
@@ -381,7 +542,7 @@ mod tests {
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"add",
                 "content":"first ever","reason":"r"}]}"#,
         );
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 0);
         assert!(report.skipped[0].contains("no existing item"));
     }
@@ -392,7 +553,7 @@ mod tests {
         let changes = set(r#"{"summary":"","changes":[
                 {"file":"lefv.md","action":"complete","content":"alpha","reason":"r"},
                 {"file":"lefv.md","action":"complete","content":"missing","reason":"r"}]}"#);
-        let report = apply(dir.path(), &items, &changes);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
         assert_eq!(report.applied, 1, "the good one still applies");
         assert_eq!(report.skipped.len(), 1);
         assert!(
