@@ -265,6 +265,95 @@ pub fn run(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Resolve a reply into the text a terminal would have shown.
+///
+/// `ollama run` re-renders text it has already streamed — cursor-back, then
+/// erase-line — even when stdout is a pipe, and it can leave a bare newline
+/// inside a JSON string. Both make a reply that reads correctly on screen fail
+/// to parse, so the escapes are applied and the stray control characters
+/// escaped rather than either being deleted.
+pub fn sanitize(raw: &str) -> String {
+    escape_controls_in_strings(&apply_cursor_moves(raw))
+}
+
+/// Replay the cursor movements, so erased text is actually erased.
+///
+/// Only backwards movement can change text already emitted; every other
+/// sequence is dropped. Deleting the escape without replaying it would leave
+/// the overwritten copy behind, which is worse than the escape itself.
+fn apply_cursor_moves(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.peek() != Some(&'[') {
+            // Not CSI: drop the escape and whatever single character follows.
+            chars.next();
+            continue;
+        }
+        chars.next();
+        let mut params = String::new();
+        let mut final_byte = None;
+        for next in chars.by_ref() {
+            if next.is_ascii_digit() || next == ';' {
+                params.push(next);
+            } else {
+                final_byte = Some(next);
+                break;
+            }
+        }
+        if final_byte == Some('D') {
+            let count = params.parse::<usize>().unwrap_or(1);
+            let line_start = out.rfind('\n').map_or(0, |at| at + 1);
+            let erasable = out[line_start..].chars().count();
+            for _ in 0..count.min(erasable) {
+                out.pop();
+            }
+        }
+    }
+    out
+}
+
+/// Escape control characters that appear inside a JSON string.
+///
+/// Between tokens they are legal whitespace; inside a string they are a parse
+/// error, and a small local model emits them.
+fn escape_controls_in_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for c in text.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' if in_string => {
+                out.push(c);
+                escaped = true;
+            }
+            '"' => {
+                in_string = !in_string;
+                out.push(c);
+            }
+            c if in_string && c.is_control() => match c {
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                other => out.push_str(&format!("\\u{:04x}", other as u32)),
+            },
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Find the JSON object in an agent's reply.
 ///
 /// Models wrap their answers: a markdown fence, a sentence of preamble, or a
@@ -272,7 +361,8 @@ pub fn run(
 /// bare object is what leaks raw JSON into the UI, so this digs the object out
 /// of whatever it arrived in.
 pub fn extract_json(raw: &str) -> Option<serde_json::Value> {
-    let text = raw.trim();
+    let resolved = sanitize(raw);
+    let text = resolved.trim();
 
     // A fenced block, with or without a language tag.
     let unfenced = text
@@ -356,7 +446,10 @@ fn readable(text: &str) -> String {
 /// a readable answer in the wrong field beats showing the user JSON.
 pub fn field(json: &str, name: &str) -> Result<String, AgentError> {
     let Some(value) = extract_json(json) else {
-        let text = json.trim();
+        // Prose, not JSON: still resolve the terminal control codes before
+        // putting it on screen.
+        let resolved = sanitize(json);
+        let text = resolved.trim();
         return if text.is_empty() {
             Err(AgentError::BadJson("the agent said nothing".to_string()))
         } else {
@@ -710,6 +803,75 @@ mod tests {
     #[test]
     fn a_prompt_config_is_still_honoured_within_the_timeout() {
         assert!(go(&service(&["echo"], SchemaMode::Prompt, None), "quick").is_ok());
+    }
+
+    // Exactly what `ollama run qwen2.5:3b --format json` emitted on a piped
+    // stdout: it wrote `"required`, moved the cursor back nine columns, erased
+    // the line and wrote the field again. One reply in five carried this.
+    const OLLAMA_REDRAW: &str = "{\"type\": \"object\", \"properties\": {\"summary\": {\"type\": \"string\"}}, \"required\u{1b}[9D\u{1b}[K\n\"required\": [\"summary\"], \"additionalProperties\": false}\n\n";
+
+    #[test]
+    fn a_cursor_move_is_applied_rather_than_stripped() {
+        // Stripping the escapes alone would leave `"required\n"required":`,
+        // which is two tokens where the terminal showed one.
+        let clean = sanitize(OLLAMA_REDRAW);
+        assert!(!clean.contains('\u{1b}'), "escapes gone: {clean:?}");
+        assert_eq!(
+            clean.matches("\"required\"").count(),
+            1,
+            "the erased copy is gone too: {clean:?}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(clean.trim()).expect("valid JSON after sanitising");
+        assert_eq!(parsed["required"][0], "summary");
+    }
+
+    #[test]
+    fn the_ollama_redraw_reply_now_reaches_extract_json() {
+        let value = extract_json(OLLAMA_REDRAW).expect("a redrawn reply still parses");
+        assert_eq!(value["type"], "object");
+    }
+
+    #[test]
+    fn a_bare_newline_inside_a_string_is_escaped_not_rejected() {
+        let raw = "{\"brief\": \"line one\nline two\"}";
+        assert!(
+            serde_json::from_str::<serde_json::Value>(raw).is_err(),
+            "the fixture is the invalid shape we are fixing"
+        );
+        let value = extract_json(raw).expect("parses once sanitised");
+        assert_eq!(value["brief"], "line one\nline two");
+    }
+
+    #[test]
+    fn newlines_between_tokens_are_left_as_whitespace() {
+        let value = extract_json("{\n  \"brief\": \"ok\"\n}").expect("plain JSON parses");
+        assert_eq!(value["brief"], "ok");
+    }
+
+    #[test]
+    fn an_already_escaped_newline_is_not_escaped_twice() {
+        let value = extract_json(r#"{"brief":"a\nb"}"#).expect("parses");
+        assert_eq!(value["brief"], "a\nb");
+    }
+
+    #[test]
+    fn an_unknown_escape_sequence_is_dropped() {
+        let clean = sanitize("{\u{1b}[1;32m\"brief\": \"ok\"\u{1b}[0m}");
+        assert_eq!(clean, "{\"brief\": \"ok\"}");
+    }
+
+    #[test]
+    fn a_cursor_move_stops_at_the_start_of_its_line() {
+        // A CUB wider than the line must not eat the line before it.
+        let clean = sanitize("first\nabc\u{1b}[99Dxyz");
+        assert_eq!(clean, "first\nxyz");
+    }
+
+    #[test]
+    fn text_with_no_escapes_is_returned_unchanged() {
+        let plain = r#"{"brief":"nothing to do here"}"#;
+        assert_eq!(sanitize(plain), plain);
     }
 
     #[test]

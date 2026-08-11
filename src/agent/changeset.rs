@@ -58,7 +58,7 @@ impl ChangeSet {
     pub fn parse(json: &str) -> Result<ChangeSet, serde_json::Error> {
         match super::extract_json(json) {
             Some(value) => serde_json::from_value(value),
-            None => serde_json::from_str(json.trim()),
+            None => serde_json::from_str(super::sanitize(json).trim()),
         }
     }
 
