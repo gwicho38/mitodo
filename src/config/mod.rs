@@ -403,7 +403,10 @@ service = "codex"
         let active = cfg.active_service();
         assert_eq!(active.service.unwrap().name, "claude");
         let notice = active.notice.expect("a notice explains the fallback");
-        assert!(notice.contains("gpt5") && notice.contains("claude"), "{notice}");
+        assert!(
+            notice.contains("gpt5") && notice.contains("claude"),
+            "{notice}"
+        );
     }
 
     #[test]
