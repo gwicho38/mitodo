@@ -175,6 +175,8 @@ pub enum Mode {
     ViewMenu,
     /// The service picker is open.
     ServiceMenu,
+    /// The command palette is open.
+    Palette,
     /// Editing the notes inside the detail pane.
     EditingDetail,
     /// The new-item dialog is open.
@@ -372,6 +374,14 @@ pub struct App {
     /// The model service in force, and the cursor within its picker.
     pub service: Option<crate::config::ServiceConfig>,
     pub service_cursor: usize,
+    /// Command palette: what has been typed, and where the cursor sits.
+    pub palette_input: String,
+    pub palette_cursor: usize,
+    pub palette_scroll: usize,
+    /// Set by the key handler's catch-all arm, so a table entry pressing an
+    /// unbound key fails a test rather than doing nothing in silence.
+    #[cfg(test)]
+    pub unhandled_key: bool,
     /// First visible row of the item list. Owned by the view, not derived
     /// from the cursor, so the wheel can scroll without moving the selection.
     pub item_scroll: usize,
@@ -441,6 +451,11 @@ impl App {
             view_cursor: 0,
             service: active.service,
             service_cursor: 0,
+            palette_input: String::new(),
+            palette_cursor: 0,
+            palette_scroll: 0,
+            #[cfg(test)]
+            unhandled_key: false,
             item_scroll: 0,
             group_scroll: 0,
             items_height: None,
@@ -786,6 +801,7 @@ impl App {
             Mode::AskingAgent(verb) => self.handle_ask_key(key, verb),
             Mode::ViewMenu => self.handle_view_key(key),
             Mode::ServiceMenu => self.handle_service_key(key),
+            Mode::Palette => self.handle_palette_key(key),
             Mode::EditingDetail => self.handle_detail_key(key),
             Mode::NewItem => self.handle_new_item_key(key),
         }
@@ -1031,6 +1047,66 @@ impl App {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         let label = self.busy.take().map(|b| b.label).unwrap_or_default();
         self.notice = Some(format!("{label} cancelled"));
+    }
+
+    fn open_palette(&mut self) {
+        self.palette_input.clear();
+        self.palette_cursor = 0;
+        self.palette_scroll = 0;
+        self.mode = Mode::Palette;
+    }
+
+    /// The entries the palette is currently showing.
+    pub fn palette_entries(&self) -> Vec<palette::Entry> {
+        let services: Vec<String> = self
+            .config
+            .services()
+            .into_iter()
+            .map(|service| service.name)
+            .collect();
+        palette::filter(&self.palette_input, &services)
+    }
+
+    fn handle_palette_key(&mut self, key: KeyEvent) {
+        use KeyCode as K;
+        let last = self.palette_entries().len().saturating_sub(1);
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            K::Esc => self.mode = Mode::Normal,
+            K::Enter => self.run_palette_entry(),
+            K::Down => self.palette_cursor = (self.palette_cursor + 1).min(last),
+            K::Up => self.palette_cursor = self.palette_cursor.saturating_sub(1),
+            K::Char('n') if control => self.palette_cursor = (self.palette_cursor + 1).min(last),
+            K::Char('p') if control => self.palette_cursor = self.palette_cursor.saturating_sub(1),
+            K::Backspace => {
+                self.palette_input.pop();
+                self.palette_cursor = 0;
+                self.palette_scroll = 0;
+            }
+            K::Char(c) => {
+                self.palette_input.push(c);
+                self.palette_cursor = 0;
+                self.palette_scroll = 0;
+            }
+            _ => {}
+        }
+    }
+
+    /// Close the palette, then do what the highlighted entry stands for.
+    ///
+    /// Closing first is what lets an action open its own mode: dispatching while
+    /// still in `Mode::Palette` would have that mode overwritten on the way out.
+    fn run_palette_entry(&mut self) {
+        let entries = self.palette_entries();
+        let Some(entry) = entries.get(self.palette_cursor).cloned() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        self.mode = Mode::Normal;
+        match entry {
+            palette::Entry::Key(action) => self.handle_normal_key(action.key),
+            palette::Entry::Service { index, .. } => self.select_service(index),
+        }
     }
 
     fn open_service_menu(&mut self) {
@@ -1415,6 +1491,8 @@ impl App {
                 self.mode = Mode::ViewMenu;
             }
             (K::Char('m'), KeyModifiers::NONE) => self.open_service_menu(),
+            (K::Char(':'), _) => self.open_palette(),
+            (K::Char('k'), KeyModifiers::CONTROL) => self.open_palette(),
             (K::Char('N'), _) => self.show_notes(),
             (K::Char('X'), _) => self.begin_archive(),
             (K::Char('n'), KeyModifiers::NONE) => self.begin_ask(Verb::Query),
@@ -1443,7 +1521,12 @@ impl App {
             (K::Char('d'), KeyModifiers::NONE) if self.selected_item().is_some() => {
                 self.mode = Mode::ConfirmingDelete;
             }
-            _ => {}
+            _ => {
+                #[cfg(test)]
+                {
+                    self.unhandled_key = true;
+                }
+            }
         }
     }
 
@@ -2539,6 +2622,164 @@ mod tests {
             body: "claude: cancelled".to_string(),
         }));
         assert!(app.modal.is_none(), "the user already knows");
+    }
+
+    // Proves the pin below is not vacuous: the flag does get set when a key
+    // reaches no arm.
+    #[test]
+    fn an_unbound_key_is_recorded_as_unhandled() {
+        let mut app = app();
+        app.unhandled_key = false;
+        app.handle_key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT));
+        assert!(app.unhandled_key);
+    }
+
+    // `normalise` upcases a lowercase char carrying SHIFT, so such an entry
+    // would silently dispatch the uppercase binding instead — a wrong action
+    // rather than a dead one, which the unhandled-key pin cannot see.
+    #[test]
+    fn no_action_pairs_a_lowercase_key_with_shift() {
+        for action in palette::ACTIONS {
+            if let KeyCode::Char(c) = action.key.code {
+                assert!(
+                    !(c.is_ascii_lowercase() && action.key.modifiers.contains(KeyModifiers::SHIFT)),
+                    "{:?} would be normalised to {:?}",
+                    action.label,
+                    c.to_ascii_uppercase()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn colon_and_ctrl_k_both_open_the_palette() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        assert_eq!(app.mode, Mode::Palette);
+
+        app.mode = Mode::Normal;
+        app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.mode, Mode::Palette);
+    }
+
+    #[test]
+    fn esc_closes_the_palette_and_runs_nothing() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.modal.is_none(), "nothing ran");
+    }
+
+    #[test]
+    fn typing_filters_the_entries() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        let all = app.palette_entries().len();
+        for c in "archive".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(app.palette_input, "archive");
+        let narrowed = app.palette_entries().len();
+        assert!(narrowed < all, "{narrowed} should be fewer than {all}");
+        assert_eq!(app.palette_entries()[0].label(), "archive finished items");
+    }
+
+    #[test]
+    fn backspace_widens_the_filter_again() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        press(&mut app, KeyCode::Char('a'));
+        press(&mut app, KeyCode::Char('r'));
+        press(&mut app, KeyCode::Backspace);
+        assert_eq!(app.palette_input, "a");
+    }
+
+    // A stale cursor would leave whatever slid under it selected.
+    #[test]
+    fn each_keystroke_puts_the_cursor_back_on_the_top_match() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.palette_cursor, 2);
+        press(&mut app, KeyCode::Char('a'));
+        assert_eq!(app.palette_cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_n_and_ctrl_p_move_like_the_arrows() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL));
+        assert_eq!(app.palette_cursor, 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert_eq!(app.palette_cursor, 0);
+    }
+
+    // The palette closes first, so the action's own mode survives.
+    #[test]
+    fn running_an_action_that_opens_a_mode_lands_in_that_mode() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char(':'));
+        for c in "manage".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::AskingAgent(Verb::Manage));
+    }
+
+    #[test]
+    fn running_an_action_that_stays_in_normal_mode_closes_the_palette() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        for c in "hide or show".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let before = app.hide_done;
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_ne!(app.hide_done, before, "the action ran");
+    }
+
+    #[test]
+    fn enter_with_no_matches_does_nothing() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        for c in "qqzzxx".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        assert!(app.palette_entries().is_empty());
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn running_a_service_entry_switches_the_active_service() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char(':'));
+        for c in "ollama".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.service.as_ref().unwrap().name, "ollama");
+    }
+
+    // The dead-entry pin: dispatch is by KeyEvent, so a typo in the table would
+    // silently produce an entry that presses a key nothing handles.
+    #[test]
+    fn every_action_in_the_table_reaches_a_real_key_handler() {
+        for action in palette::ACTIONS {
+            let mut app = app();
+            app.unhandled_key = false;
+            app.handle_key(action.key);
+            assert!(
+                !app.unhandled_key,
+                "{:?} presses {:?}, which no arm handles",
+                action.label, action.keys
+            );
+        }
     }
 
     #[test]

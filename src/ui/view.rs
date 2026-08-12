@@ -1246,6 +1246,10 @@ fn render_status(app: &App, frame: &mut Frame, area: Rect) {
             " j/k move · enter select · esc close ".to_string(),
             theme.statusbar(),
         )),
+        (None, None, Mode::Palette) => Line::from(Span::styled(
+            " type to filter · ↑↓ move · enter run · esc close ".to_string(),
+            theme.statusbar(),
+        )),
         (None, None, Mode::Modal) => Line::from(Span::styled(
             " any key to dismiss ".to_string(),
             theme.statusbar(),
