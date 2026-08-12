@@ -125,6 +125,9 @@ pub fn render(app: &App, frame: &mut Frame) -> Rendered {
     if app.mode == Mode::ServiceMenu {
         render_service_menu(app, frame, f.top_bar);
     }
+    if app.mode == Mode::Palette {
+        render_palette(app, frame, f.whole);
+    }
     Rendered {
         frames: f,
         modal_rows,
@@ -333,6 +336,91 @@ fn render_new_item(app: &App, frame: &mut Frame, area: Rect) {
     if let Some((x, y)) = caret {
         frame.set_cursor_position((popup.x + 1 + x, popup.y + 1 + y));
     }
+}
+
+/// Where the palette is drawn, so clicks can reach its rows.
+pub fn palette_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(10).clamp(30, 76);
+    let height = area.height.saturating_sub(6).clamp(8, 18);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// How many entry rows the palette can show at once.
+///
+/// It spends rows on its border, the input line, the blank beneath it and the
+/// footer hint.
+pub fn palette_visible_rows(area: Rect) -> usize {
+    palette_rect(area).height.saturating_sub(5) as usize
+}
+
+/// The command palette: an input line over a ranked list.
+fn render_palette(app: &App, frame: &mut Frame, area: Rect) {
+    let theme = &app.theme;
+    let rect = palette_rect(area);
+    let width = rect.width.saturating_sub(2) as usize;
+    let height = palette_visible_rows(area);
+
+    let entries = app.palette_entries();
+    let start = clamp_scroll(app.palette_scroll, entries.len(), height);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(" > ", theme.query()),
+            Span::styled(app.palette_input.clone(), theme.command_input()),
+            Span::styled("\u{2588}", theme.command_input()),
+        ]),
+        Line::from(""),
+    ];
+
+    if entries.is_empty() {
+        lines.push(Line::from(Span::styled(
+            " no matching command".to_string(),
+            theme.inactive(),
+        )));
+    }
+
+    for (offset, entry) in entries.iter().skip(start).take(height).enumerate() {
+        let selected = start + offset == app.palette_cursor;
+        let style = if selected {
+            theme.selected(&theme.paragraph())
+        } else {
+            theme.paragraph()
+        };
+        let marker = if selected { "\u{25b8} " } else { "  " };
+        let tail = format!("{}  {}", entry.category(), entry.keys());
+        let room = width
+            .saturating_sub(marker.chars().count())
+            .saturating_sub(tail.chars().count() + 2);
+        let label = truncate(&entry.label(), room);
+        let gap = width
+            .saturating_sub(marker.chars().count())
+            .saturating_sub(label.chars().count())
+            .saturating_sub(tail.chars().count());
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker}{label}"), style),
+            Span::styled(format!("{}{tail}", " ".repeat(gap)), theme.inactive()),
+        ]));
+    }
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme.eff_border(true))
+                .title(format!(
+                    "palette — {}/{}",
+                    entries.len(),
+                    super::palette::ACTIONS.len()
+                )),
+        ),
+        rect,
+    );
 }
 
 /// Where the review list is drawn, so clicks can reach its rows.

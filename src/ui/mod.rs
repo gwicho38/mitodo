@@ -1555,6 +1555,13 @@ impl App {
             return;
         }
 
+        if self.mode == Mode::Palette {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.click_palette(x, y);
+            }
+            return;
+        }
+
         // The new-item dialog: buttons, fields and priority bands all click.
         if self.mode == Mode::NewItem {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -1699,6 +1706,25 @@ impl App {
         {
             self.view_cursor = row;
             self.toggle_view_setting(setting);
+        }
+    }
+
+    /// A click while the palette is open: run the row, or dismiss.
+    pub fn click_palette(&mut self, x: u16, y: u16) {
+        let rect = view::palette_rect(self.layout.whole);
+        if !within(rect, x, y) {
+            self.mode = Mode::Normal;
+            return;
+        }
+        // The input line and the blank beneath it sit above row 0 of the list.
+        let list_top = rect.y + 3;
+        if y < list_top {
+            return;
+        }
+        let row = (y - list_top) as usize + self.palette_scroll;
+        if row < self.palette_entries().len() {
+            self.palette_cursor = row;
+            self.run_palette_entry();
         }
     }
 
@@ -2649,6 +2675,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_palette_rect_is_centred_and_fits_the_frame() {
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 40,
+        };
+        let rect = view::palette_rect(frame);
+        assert!(rect.width < frame.width && rect.height < frame.height);
+        assert_eq!(rect.x + rect.width / 2, frame.width / 2, "centred");
+    }
+
+    // `with_layout` draws a real frame headlessly and adopts its layout, so the
+    // click lands where a live terminal would put it.
+    #[test]
+    fn a_click_on_a_palette_row_runs_that_entry() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        for c in "hide or show".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        with_layout(&mut app);
+        assert_eq!(
+            app.palette_entries()[0].label(),
+            "hide or show done items",
+            "row 0 is the entry the click should run"
+        );
+
+        let before = app.hide_done;
+        let rect = view::palette_rect(app.layout.whole);
+        app.click_palette(rect.x + 2, rect.y + 3);
+        assert_eq!(app.mode, Mode::Normal, "the palette closed");
+        assert_ne!(app.hide_done, before, "and that row's action ran");
+    }
+
+    #[test]
+    fn a_click_outside_the_palette_closes_it_without_running_anything() {
+        let mut app = app();
+        press(&mut app, KeyCode::Char(':'));
+        with_layout(&mut app);
+        app.click_palette(0, 0);
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn drawing_the_palette_does_not_panic_at_any_filter_width() {
+        let mut app = app_with_services();
+        press(&mut app, KeyCode::Char(':'));
+        with_layout(&mut app);
+
+        for c in "archive finished items and then some overflowing text".chars() {
+            press(&mut app, KeyCode::Char(c));
+            with_layout(&mut app);
+        }
+        assert!(
+            app.palette_entries().is_empty(),
+            "the filter narrowed to nothing"
+        );
     }
 
     #[test]
