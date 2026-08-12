@@ -1,8 +1,20 @@
 # `mitodo mcp-server` — Design
 
 **Date:** 2026-08-12
-**Status:** Approved for planning
-**Sub-project:** 1 of 4 toward a conversational agent (see §10)
+**Status:** SUPERSEDED — do not implement
+**Superseded by:** [`~/repos/todos-mcp`](https://github.com/gwicho38/todos-mcp), which already
+implements this. Verified 2026-08-12: `todos-mcp` installed at `~/.local/bin/todos-mcp`,
+driven by `claude --mcp-config`, listed all seven groups of the live workspace correctly.
+It exposes `todos_list`, `todos_search`, `todos_get_item`, `todos_get_file`,
+`todos_list_accounts`, `todos_create_item`, `todos_update_item`, `todos_archive_item`,
+`todos_reindex` and `todos_status`; it uses the same content-hash id scheme (mitodo's
+`ItemId` was written to match it); and it does format-preserving conflict-aware writes with
+an FTS5 index and a self-write-gated file watcher.
+**What is still missing there:** `create_group` and `git_sync`. Add them to `todos-mcp`
+rather than building a second server.
+**Kept for:** §3's wire protocol, captured from a live client — still the reference for
+sub-project 2, which spawns an MCP client.
+**Sub-project:** was 1 of 4 toward a conversational agent (see §10)
 **Builds on:** [2026-08-11-model-services-and-agent-popup-design.md](2026-08-11-model-services-and-agent-popup-design.md), [2026-08-12-command-palette-design.md](2026-08-12-command-palette-design.md)
 
 ---
