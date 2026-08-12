@@ -1,29 +1,20 @@
 # `mitodo mcp-server` — Design
 
-**Date:** 2026-08-12
-**Status:** SUPERSEDED — do not implement
-**Superseded by:** [`~/repos/todos-mcp`](https://github.com/gwicho38/todos-mcp), which already
-implements this. Verified 2026-08-12: `todos-mcp` installed at `~/.local/bin/todos-mcp`,
-driven by `claude --mcp-config`, listed all seven groups of the live workspace correctly.
-It exposes `todos_list`, `todos_search`, `todos_get_item`, `todos_get_file`,
-`todos_list_accounts`, `todos_create_item`, `todos_update_item`, `todos_archive_item`,
-`todos_reindex` and `todos_status`; it uses the same content-hash id scheme (mitodo's
-`ItemId` was written to match it); and it does format-preserving conflict-aware writes with
-an FTS5 index and a self-write-gated file watcher.
-**What is still missing there:** `create_group` and `git_sync`. Add them to `todos-mcp`
-rather than building a second server.
-**Kept for:** §3's wire protocol, captured from a live client — still the reference for
-sub-project 2, which spawns an MCP client.
-**Sub-project:** was 1 of 4 toward a conversational agent (see §10)
+**Date:** 2026-08-12 (rewritten as a port)
+**Status:** Approved for planning
+**Sub-project:** 1 of 4 toward a conversational agent (see §11)
+**Ports:** [`~/repos/todos-mcp`](https://github.com/gwicho38/todos-mcp) — a working
+Python MCP server over the same workspace. Its tool surface, semantics and error
+codes are adopted; its SQLite/FTS5 index is not.
 **Builds on:** [2026-08-11-model-services-and-agent-popup-design.md](2026-08-11-model-services-and-agent-popup-design.md), [2026-08-12-command-palette-design.md](2026-08-12-command-palette-design.md)
 
 ---
 
 ## 1. What this is
 
-A new subcommand, `mitodo mcp-server`, that speaks the Model Context Protocol over
-stdio and exposes mitodo's operations as tools. Point Claude Code or Codex at it
-and the agent can read and manage your todos itself:
+A new subcommand, `mitodo mcp-server`, speaking the Model Context Protocol over
+stdio and exposing mitodo's operations as tools. Point Claude Code or Codex at it
+and the agent manages your todos itself:
 
 ```
 claude --strict-mcp-config \
@@ -31,14 +22,18 @@ claude --strict-mcp-config \
   -p 'archive the everlongtech items that closed, and add a P1 to chase Sam'
 ```
 
-It ships value on its own, with no changes to the TUI. It is also the foundation
-for sub-project 2, where a chat popup inside mitodo spawns exactly that command.
+It ships value on its own with no TUI changes, and is the foundation for
+sub-project 2, where a chat popup inside mitodo spawns exactly that command.
 
-**Why a server rather than a tool loop inside mitodo.** `claude` and `codex` are
-both MCP clients with their own reasoning loop, permission model and turn
-management. Handing them a tool catalogue means mitodo does not reimplement any
-of that. The agent's loop is the agent's problem; mitodo's job is to expose
-operations and keep the files correct.
+**Why port rather than build fresh.** `todos-mcp` already solved this problem
+against this workspace, and its contracts are better than the ones first drafted
+here: one write tool that toggles *and* edits in a single conflict-aware pass,
+machine-readable error codes, and a distinction between "you already changed that"
+and "someone else did".
+
+**Why port rather than depend on it.** A Rust port is one binary with no Python
+runtime, reuses `store::write` so the byte-preservation guarantee is the one
+mitodo already tests, and leaves a single writer on the workspace.
 
 ---
 
@@ -46,17 +41,69 @@ operations and keep the files correct.
 
 | Decision | Chosen | Alternative rejected |
 |---|---|---|
-| Transport | MCP over stdio, line-delimited JSON-RPC 2.0 | A hand-rolled prompt-and-parse loop inside mitodo (reimplements the agent's loop, loses its permission model) |
-| Protocol version | **Echo whatever the client sends** | Assert a fixed version (the live client sends `2025-11-25` while the published spec has moved to a stateless `2026-07-28`; asserting either breaks the other) |
-| Writes | Apply immediately; git is the undo | Per-call approval round-tripped to the TUI (hardest piece in the system); batching into the review pane (agent cannot see its own effects mid-conversation) |
-| Item addressing | `ItemId` hex, returned by every read | Group + text substring (ambiguous across groups); group + line number (brittle across edits) |
-| Tool surface | 15 tools: 4 reads, 10 writes, `git_sync` | Adding `set_query` (it changes TUI state in another process — belongs in sub-project 2); adding UI-control tools (same reason) |
-| Write path | Reuse `store::write` verbatim | Tools writing markdown directly (would break the byte-preservation guarantee) |
-| Shared state | None. Files on disk are the only channel | IPC to a running TUI (the TUI's `notify` watcher already refreshes on file change) |
+| Implementation | Rust, in-repo, ported from todos-mcp | Depend on todos-mcp (adds a Python runtime to the chat feature); invent a fresh surface (worse contracts, per §3) |
+| Transport | MCP over stdio, line-delimited JSON-RPC 2.0 | A hand-rolled prompt-and-parse loop — reimplements the agent's loop, loses its permission model |
+| Protocol version | **Echo whatever the client sends** | Assert a fixed one: the live client sends `2025-11-25`, the published spec has moved to a stateless `2026-07-28` |
+| Writes | Apply immediately; git is the undo | Per-call approval across a process boundary; batching into the review pane |
+| Item ids | mitodo's `ItemId`, now carrying an occurrence index (`3961186`) | todos-mcp's blake2b/16 scheme — compatibility with a server this replaces |
+| Search | mitodo's existing query language | Port FTS5/BM25 (needs rusqlite and an index that can drift); fuzzy scoring (a scorer tuned for 41 short labels) |
+| Write path | Reuse `store::write` verbatim | Tools writing markdown directly, breaking byte preservation |
+| Shared state | None — files on disk are the only channel | IPC to a running TUI; its `notify` watcher already refreshes on change |
 
 ---
 
-## 3. The wire protocol, as captured from a live client
+## 3. What the port adopts, and what it leaves behind
+
+Read from `~/repos/todos-mcp/src/todos_mcp/{server,writer,parser}.py`.
+
+**Adopted, because it beats the first draft written here:**
+
+| todos-mcp | first draft | why theirs wins |
+|---|---|---|
+| `update_item{id, new_text?, done?}` → item with its **new id** | `complete_item` + `uncomplete_item` + `edit_item_text` | toggle and edit in one conflict-aware write; no half-applied pair |
+| envelope `{"error": code, "message": …}`, codes `conflict`, `not_found`, `ambiguous_match`, `invalid_priority`, `invalid_account`, `validation_error` | free-text `isError` | the agent branches on a code instead of parsing prose |
+| re-locate the target by identity tuple on re-read, then write | resolve once, then write | drift between read and write is detected, not assumed away |
+| a retired-id registry: an id this writer invalidated reports `not_found`, one that drifted out-of-band reports `conflict` | one `conflict` for both | tells the agent "you already changed that" apart from "someone else did" |
+
+**Considered and deferred:** todos-mcp's `heading_path: [string]`, matched at any
+heading level, is better than a two-level `section` — it handles `###` and deeper,
+which mitodo's parser flattens. Adopting it means teaching `store::parse` to carry
+a path rather than `section` + `heading`, which is a change to a core type for a
+gain no current workspace needs. `todos_create_item` therefore takes `section`,
+and §10 records the deferral.
+
+**Left behind:**
+
+- **`todos_search`, `todos_status`, `todos_reindex`** — all three serve the
+  SQLite/FTS5 index. Search becomes `todos_list{query}` over mitodo's query
+  language, already implemented, tested and documented.
+- **The index and its watcher.** Each call re-reads the workspace. Seven groups
+  and a few hundred items cost less than a cache that can drift against a TUI
+  editing the same files.
+- **`normalized_text` in the id.** mitodo hashes raw text; changing that would
+  rewrite every id for no gain here.
+- **Note-context records** (`notes.md` parsed into heading/prose/pointer/bullet
+  kinds). `todos_get_file` returns a group's notes verbatim instead.
+
+**Two claims corrected while reading the source:**
+
+1. An earlier draft of this design said the two id schemes matched, quoting
+   mitodo's own doc comment. They never did — sha256/12 over
+   `(file, section, heading, indent, text)` here versus blake2b/16 over
+   `(file, heading_path, normalized_text, occurrence_index)` there;
+   `b5795463985e` versus `bb0f022283041cab` for the same item. Corrected in
+   `3961186`, which also added the occurrence index that stops two identical
+   items sharing an id.
+2. An intermediate note claimed todos-mcp creates groups implicitly, so
+   `create_group` was unnecessary. It does not. `created_group` there means an
+   absent `###` *leaf heading* was created; the account's `TODO.md` must already
+   exist (`invalid_account`), and a missing `## Pn` section is refused rather than
+   invented (`missing_priority_section`). Directory-backed group creation is
+   genuinely absent, hence `todos_create_group` in §6.
+
+---
+
+## 4. The wire protocol, captured from a live client
 
 Not taken from the specification. `claude 2.1.228` was pointed at a stub server
 that logged its stdin; the exchange is saved verbatim at
@@ -78,34 +125,31 @@ and is the fixture the protocol tests replay.
 ← {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":…,"description":…,
                                              "inputSchema":{…}},…]}}
 
-→ {"method":"tools/call","params":{"name":"ping","arguments":{},
+→ {"method":"tools/call","params":{"name":"…","arguments":{…},
      "_meta":{"claudecode/toolUseId":"toolu_…","progressToken":2}},"jsonrpc":"2.0","id":2}
 ← {"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"…"}]}}
 ```
 
-Four consequences, each one a thing that would otherwise be guessed wrong:
+Four consequences that would otherwise be guessed wrong:
 
 - **The installed client uses the classic handshake at `2025-11-25`.** The
-  published `2026-07-28` spec retires `initialize`/`initialized` entirely in
-  favour of per-request `_meta`. Implementing only the current spec would produce
-  a server no installed client can talk to. Echoing the client's version, and
-  never *requiring* `initialize` before serving `tools/list`, satisfies both.
+  published `2026-07-28` spec retires `initialize`/`initialized` in favour of
+  per-request `_meta`. Building only to the current spec yields a server no
+  installed client can talk to. Echoing the client's version, and never
+  *requiring* `initialize` before serving `tools/list`, satisfies both.
 - **Line-delimited JSON**, one object per line. No `Content-Length` framing —
-  that belongs to the HTTP transport.
+  that is the HTTP transport.
 - **`notifications/initialized` has no `id`** and must receive no response.
-  Replying to a notification is a protocol violation.
-- **`tools/call` carries `_meta`** with a progress token; a minimal server
-  ignores it.
+- **`tools/call` carries `_meta`** with a progress token; ignore it.
 
 ### stdout is protocol-only
 
 Every diagnostic goes to stderr. A stray `println!` corrupts the stream and
-surfaces as an unexplained client-side parse failure — the easiest way to break
-an MCP server, and worth a lint-level habit rather than a comment.
+surfaces as an unexplained client-side parse failure.
 
 ---
 
-## 4. Architecture
+## 5. Architecture
 
 ```
   mitodo mcp-server                    a subcommand: no TUI, no terminal setup
@@ -114,7 +158,7 @@ an MCP server, and worth a lint-level habit rather than a comment.
   │                                               │                      │
   │   initialize              ──▶ echo protocolVersion, {"tools":{}}      │
   │   notifications/initialized ──▶ ignore                                │
-  │   tools/list              ──▶ 15 schemas from one static table        │
+  │   tools/list              ──▶ 13 schemas from one static table        │
   │   tools/call              ──▶ run it; _meta ignored                   │
   │   other, with an id       ──▶ −32601                                  │
   │   other, without one      ──▶ ignore                                  │
@@ -128,133 +172,140 @@ an MCP server, and worth a lint-level habit rather than a comment.
                      conflict-aware, byte-preserving
 ```
 
-New module layout, keeping files focused:
-
 | File | Responsibility |
 |---|---|
 | `src/mcp/mod.rs` | the stdio loop: read a line, dispatch, write a line |
-| `src/mcp/protocol.rs` | JSON-RPC envelope types, error codes, response builders |
+| `src/mcp/protocol.rs` | JSON-RPC envelopes, error codes, response builders |
 | `src/mcp/tools.rs` | the static tool table: name, description, `inputSchema` |
-| `src/mcp/exec.rs` | argument parsing and each tool's call into `store` |
+| `src/mcp/exec.rs` | argument parsing, the retired-id registry, calls into `store` |
 
 `src/cli.rs` gains `Command::McpServer`; `src/main.rs` dispatches to
-`mcp::serve(config)` before any terminal setup, since this process has no UI.
+`mcp::serve(config)` before any terminal setup.
 
 **No shared state with the TUI.** Each call re-reads the workspace, resolves the
-item, and writes through `verify`. A TUI open on the same workspace refreshes via
-its existing `notify` watcher. Two processes, one source of truth on disk.
+item, writes through `verify`. A TUI open on the same workspace refreshes through
+its existing `notify` watcher.
 
 ---
 
-## 5. The tools
+## 6. The tools
 
-Every read returns `ItemId` hex strings; every write takes them. `ItemId::compute`
-hashes `(file, section, heading, indent, text)`, so an id survives completing,
-archiving and note edits, and **changes when the text changes** —
-`edit_item_text` therefore returns the new id.
+Names keep the `todos_` prefix, so prompts written against todos-mcp keep working
+and the two servers stay recognisably one surface. Thirteen in total — four reads,
+eight writes and `todos_sync` — against todos-mcp's ten.
 
 ```
- reads                                                    maps to
+ reads                                                       maps to
  ──────────────────────────────────────────────────────────────────────────────
- list_items{query?, group?}   → [{id, text, done, priority, group, section,
-                                  due, has_notes, parent}]
-                                              query::Query + store parse
- get_item{id}                 → {…, notes, children:[{id, text, done}]}
- list_groups{}                → [{name, todo_file, open, total, has_notes,
-                                  archive_dir?}]
- read_group_notes{group}      → {text}                     notes sidecar
+ todos_list{query?, group?, include_done=false}
+     → [{id, group, section, priority, text, done, has_notes, due,
+         line, occurrence, parent}]
+                                    query::Query::parse + Workspace::load
+ todos_get_item{id}
+     → {…as above…, notes, children:[{id, text, done}]}
+ todos_get_file{group}      → {path, text}     the group's TODO.md verbatim
+ todos_list_groups{}        → [{name, todo_file, open, total, has_notes,
+                                archive_dir?}]
 
- writes                                                   maps to
+ writes                                                      maps to
  ──────────────────────────────────────────────────────────────────────────────
- add_item{group, text, section?, notes?, children?} → {id} store::create_item
- add_child{parent_id, text}   → {id}                       store::add_item
- complete_item{id}            → {}                         store::toggle(true)
- uncomplete_item{id}          → {}                         store::toggle(false)
- edit_item_text{id, text}     → {id}   ← the new id        store::edit_text
- set_item_notes{id, notes}    → {}                         store::set_description
- delete_item{id}              → {}                         store::delete_item
- archive_item{id}             → {}                         store::archive_items
- archive_finished{group}      → {archived, skipped[]}      store::archive_done
- create_group{name}           → {todo_file}                mkdir + seeded TODO.md
-
- session                                                   maps to
- ──────────────────────────────────────────────────────────────────────────────
- git_sync{}                   → {ok, transcript}           crate::git
+ todos_create_item{group, text, priority?, section?, notes?, children?}
+     → {item, created_heading}                  store::create_item
+ todos_add_child{parent_id, text}     → {item}  store::add_item
+ todos_update_item{id, new_text?, done?}
+     → {item}   ← the item's NEW id when text changed
+                                                store::edit_text, store::toggle
+ todos_set_notes{id, notes}           → {item}  store::set_description
+ todos_delete_item{id}                → {deleted:true}        store::delete_item
+ todos_archive_item{id}               → {item, archived:true} store::archive_items
+ todos_archive_finished{group}        → {archived, skipped[]}  store::archive_done
+ todos_create_group{name}             → {name, todo_file}      mkdir + seeded file
+ todos_sync{}                         → {ok, transcript}       crate::git
 ```
 
 ### Details that are otherwise a coin toss
 
-- **`add_child` indents by two beyond its parent** and anchors to the parent's
-  line, via `store::add_item(path, parent.line, parent.raw, parent.indent + 2,
-  text)`. That is what the TUI's own `A` key does.
-- **`list_items{query}` parses the string with `query::Query::parse`.** A
-  malformed query is an `isError` result carrying the parser's message, not a
-  protocol error — the agent can then fix its own query.
-- **`get_item{id}.children` are direct children only**, not the whole subtree.
-  The agent walks deeper by calling `get_item` on a child id.
-- **`archive_item` and `archive_finished` need the group's `archive_dir`.**
-  Absent, they return `isError` with
-  `no archive_dir configured for <group>` — the same rule `changeset::apply`
-  already follows.
-- **`git_sync` requires `[git] enabled = true`.** Otherwise it returns `isError`
-  with `git sync is disabled in config`, mirroring the TUI's `s`.
-
-Three notes:
-
-- **`create_group`** is the only tool that creates a directory. It writes
-  `<root>/<name>/TODO.md`, seeding it with the `## ` headings **copied from the
-  first existing group's file**, so a new group matches the convention already in
-  use. With no group to copy from, it seeds `## P0` … `## P3` when
+- **`todos_update_item` merges toggle and edit**, as todos-mcp does: `new_text`
+  alone edits, `done` alone toggles, both do both in one write, and the returned
+  item carries the new id when the text changed. Neither argument given is a
+  `validation_error`.
+- **`todos_create_item` never invents a `## Pn` section.** With `priority` given
+  and no matching section in the file, it fails `missing_priority_section` —
+  todos-mcp's rule, kept, because inventing sections reshapes a file the user
+  formats by hand.
+- **`section` rather than `heading_path` here.** mitodo's parser carries a
+  two-level `section` + `heading`, and `store::create_item` already places by
+  section. Accepting a full path would mean either flattening it silently or
+  reworking the parser — out of scope for this sub-project, and recorded in §10.
+- **`todos_add_child` indents two beyond its parent** and anchors to the parent's
+  line: `store::add_item(path, parent.line, parent.raw, parent.indent + 2, text)`,
+  which is what the TUI's `A` key does.
+- **`todos_list{query}` parses with `query::Query::parse`.** A malformed query
+  returns the envelope carrying the parser's message, so the agent can fix it.
+- **`todos_get_item.children` are direct children only.** The agent walks deeper
+  by id.
+- **Both archive tools need the group's `archive_dir`.** Absent, they fail with
+  `no archive_dir configured for <group>`.
+- **`todos_sync` requires `[git] enabled = true`** and runs only the argv list
+  already in `[git] sync`.
+- **`todos_create_group{name}`** is the one tool that creates a directory. It
+  writes `<root>/<name>/TODO.md` seeded with the `## ` headings copied from the
+  first existing group, so a new group matches the convention in use; with no
+  group to copy from it seeds `## P0` … `## P3` when
   `[priority] source = "heading"`, and an empty file otherwise. Seeding matters:
-  without a section the next `add_item` would hit the empty-file dead end fixed
-  in `c5e27be`.
-- **`archive_finished` keeps its guard**: it refuses an item whose subtree still
-  holds open work and lists it in `skipped`, exactly as `X` does.
-  `archive_item` is single and deliberate, and does not.
-- **`set_query` is deliberately absent.** It would change what *your screen*
-  shows — TUI state in another process. It belongs in sub-project 2, where the
-  popup runs inside the TUI and can set it directly.
+  without a section the next create would hit the empty-file dead end fixed in
+  `c5e27be`.
 
 ---
 
-## 6. Errors
+## 7. Errors
+
+Two channels. Conflating them is a common MCP bug.
 
 | Failure | Channel | Example |
 |---|---|---|
 | malformed JSON on stdin | `error` **−32700** | a truncated line |
-| request with an `id` naming an unknown method | **−32601** | `tools/foo` |
-| `tools/call` missing `name`, or a bad argument type | **−32602** | `complete_item{}` |
-| **the tool ran and failed** | `result` with **`isError: true`** | `no item with id a1b2c3d4e5f6` |
+| a request with an `id` naming an unknown method | **−32601** | `tools/foo` |
+| `tools/call` missing `name`, or a bad argument type | **−32602** | no `name` field |
+| **the tool ran and failed** | `result`, `isError: true`, text is the envelope | `{"error":"conflict","message":"…"}` |
 | a notification we do not handle | nothing | `notifications/cancelled` |
 
-A tool failure is a *result*, not an error. The agent reads `isError` text and can
-react — "that id is stale, list again" — whereas a JSON-RPC error is a
-transport-level fault that may abort its turn. So `file changed on disk`,
-`no such group` and `name already exists` are all `isError` results.
+Tool failures are *results* carrying todos-mcp's envelope
+`{"error": code, "message": …}` as their text. The agent branches on `code`:
 
-Shutdown follows the stdio rule: stdin closes → EOF → exit 0. The client owns our
-lifetime, so no heartbeat is needed.
+| code | meaning |
+|---|---|
+| `not_found` | the id was retired by a write this server made — you already changed it |
+| `conflict` | the item drifted out-of-band; re-read and retry |
+| `ambiguous_match` | the id resolved to more than one line |
+| `invalid_group` | no such group, or not a valid group name |
+| `invalid_priority` | not one of `P0`–`P3` |
+| `missing_priority_section` | the file carries no section with that priority token |
+| `validation_error` | empty text, or another argument the tool refuses |
+| `git_disabled` | `[git] enabled = false` |
 
----
+The `not_found` / `conflict` split needs the **retired-id registry**: an
+in-process set of ids this server invalidated by its own writes. Without it both
+cases look identical and the agent cannot tell its own edit from someone else's.
+The registry lives for the process's lifetime and is not persisted.
 
-## 7. The containment boundary
-
-**No tool accepts a path.** Tools take a *group name*, and the server joins it
-onto the workspace root itself. A name is rejected when it contains `/` or `\`,
-equals `..`, or begins with `.`. The agent therefore cannot address anything
-outside the workspace even by mistake.
-
-There is no shell in the server. `git_sync` runs only the argv list already in
-`[git] sync` in the user's config.
-
-Requests are handled one at a time, sequentially. stdio is a single stream and
-the workspaces are small (seven groups, a few hundred items), so re-reading per
-call costs less than the complexity of a cache that could go stale against a TUI
-editing the same files.
+Shutdown follows the stdio rule: stdin closes → EOF → exit 0.
 
 ---
 
-## 8. Testing
+## 8. The containment boundary
+
+**No tool accepts a path.** Tools take a *group name*; the server joins it onto
+the workspace root. A name is rejected when it contains `/` or `\`, equals `..`,
+or begins with `.`. Writes never target `_archive/` — todos-mcp's
+`_reject_if_archive` rule, kept.
+
+There is no shell in the server. `todos_sync` runs only the argv list already in
+the user's config. Requests are handled one at a time, sequentially.
+
+---
+
+## 9. Testing
 
 No model and no network in the suite.
 
@@ -262,7 +313,7 @@ No model and no network in the suite.
  protocol      the recorded transcript replays clean:
                  initialize (2025-11-25) → response echoes that version
                  notifications/initialized → stdout stays empty
-                 tools/list → 15 tools, each inputSchema valid JSON Schema
+                 tools/list → 13 tools, each inputSchema valid JSON Schema
                  tools/call → result with content[0].type == "text"
                malformed line → −32700;  unknown method with id → −32601
                unknown tool name → isError result, not a protocol error
@@ -271,73 +322,73 @@ No model and no network in the suite.
  tools         table-driven, a temp workspace each:
                  every write tool's file effect asserted byte-for-byte
                  every read tool's JSON shape asserted
-                 a stale id → isError "no item with id …"
-                 a file changed between read and write →
-                   isError "file changed on disk", file untouched
-                 archive_finished still refuses a subtree with open work
-                 edit_item_text returns an id that resolves afterwards
+                 update_item with new_text returns an id that resolves after
+                 update_item with done only keeps the id
+                 update_item with neither → validation_error
+                 create_item with a priority absent from the file →
+                   missing_priority_section, file untouched
                  add_child lands two spaces deeper than its parent
-                 a malformed query → isError carrying the parser's message
-                 archive with no archive_dir → isError, file untouched
-                 git_sync with [git] enabled=false → isError
-                 create_group copies the headings from an existing group
+                 a malformed query → envelope carrying the parser's message
+                 archive with no archive_dir → invalid_group, file untouched
+                 sync with [git] enabled=false → git_disabled
+                 create_group copies headings from an existing group
+
+ identity      an id retired by our own write → not_found
+               an item changed on disk behind us → conflict
+               the two are distinguishable — the registry's whole point
 
  containment   group names "../evil", "/etc/passwd", ".git", "a/b" rejected,
-               and no file is created anywhere
+               no file created anywhere; a write aimed at _archive/ refused
 
  formatting    the project's core guarantee, re-pinned at this layer:
-                 add_item into a real fixture leaves every other line
+                 create_item into a real fixture leaves every other line
                  byte-identical, including line endings and final newline
 ```
 
 **Not in CI:** a live run driving real `claude --mcp-config` against the built
-binary. It needs network and a model, so it is a documented manual smoke step;
-the plan spells out the exact command and what to look for.
+binary. It needs network and a model, so it is a documented manual smoke step.
 
 ---
 
-## 9. Out of scope
+## 10. Out of scope
 
 - The chat popup inside the TUI — sub-project 2
 - Retiring the seven verbs and deleting the review layer — sub-project 3
 - Ollama tool-calling over its HTTP API — sub-project 4
-- `set_query` and any tool that drives the interface
-- MCP resources, prompts, sampling, elicitation, or progress notifications
-- The stateless `2026-07-28` request shape, beyond not requiring `initialize`
-- Serving MCP over HTTP or SSE
-- Concurrent request handling
+- An FTS5 index, and `todos_search` / `todos_status` / `todos_reindex`
+- Arbitrary-depth `heading_path` placement, which would need mitodo's parser to
+  carry a path rather than `section` + `heading`
+- A tool that changes what the TUI displays (`set_query`) or drives its cursor
+- MCP resources, prompts, sampling, elicitation, progress notifications
+- Serving MCP over HTTP or SSE, and concurrent request handling
+- Note-context records parsed out of `notes.md`
 
 ---
 
-## 10. Where this sits
+## 11. Where this sits
 
 | # | Sub-project | Status |
 |---|---|---|
-| **1** | `mitodo mcp-server` — this spec | designing |
+| **1** | `mitodo mcp-server`, ported from todos-mcp — this spec | designing |
 | 2 | Chat popup driving claude/codex over MCP | after 1 |
 | 3 | Retire the seven verbs, delete the review layer (~700 lines) | after 2 |
 | 4 | Ollama tool-calling over its HTTP API | after 2 |
 
-Decisions already taken that shape 2–4: writes apply immediately with git as the
-undo; all seven verb keys retire in favour of one chat key; the review pane is
-deleted once nothing calls it; ollama gets a hand-rolled loop against
-`127.0.0.1:11434` because its CLI cannot be given our tools.
-
 ---
 
-## 11. Files touched
+## 12. Files touched
 
 | File | Change |
 |---|---|
 | `src/mcp/mod.rs` | New: the stdio serve loop |
-| `src/mcp/protocol.rs` | New: JSON-RPC envelopes, error codes, response builders |
-| `src/mcp/tools.rs` | New: the 15-tool static table with `inputSchema`s |
-| `src/mcp/exec.rs` | New: argument parsing and calls into `store` |
+| `src/mcp/protocol.rs` | New: JSON-RPC envelopes, error codes, builders |
+| `src/mcp/tools.rs` | New: the 13-tool static table with `inputSchema`s |
+| `src/mcp/exec.rs` | New: argument parsing, retired-id registry, calls into `store` |
 | `src/cli.rs` | `Command::McpServer` |
 | `src/main.rs` | dispatch before terminal setup |
 | `src/store/mod.rs` | re-export anything the tools need that is currently private |
 | `resources/mcp-client-handshake.log` | the captured transcript, as a test fixture |
 | `README.md` | how to point Claude Code or Codex at it |
 
-No new dependencies: `serde_json` and `serde` are already present, and the loop
-uses `std::io` only.
+No new dependencies: `serde`, `serde_json` and `sha2` are already present; the
+loop uses `std::io` only.
