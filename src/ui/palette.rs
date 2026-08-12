@@ -311,46 +311,236 @@ pub const ACTIONS: [Action; 41] = [
     },
 ];
 
+/// One row of the palette.
+///
+/// A service is not a keypress — picking one calls into the service list by
+/// index — so the two cases stay distinct rather than being forced into a key.
+#[derive(Debug, Clone)]
+pub enum Entry {
+    Key(&'static Action),
+    Service { name: String, index: usize },
+}
+
+impl Entry {
+    pub fn label(&self) -> String {
+        match self {
+            Entry::Key(action) => action.label.to_string(),
+            Entry::Service { name, .. } => format!("use model service: {name}"),
+        }
+    }
+
+    pub fn keys(&self) -> &str {
+        match self {
+            Entry::Key(action) => action.keys,
+            Entry::Service { .. } => "",
+        }
+    }
+
+    pub fn category(&self) -> &'static str {
+        match self {
+            Entry::Key(action) => action.category.label(),
+            Entry::Service { .. } => "Model",
+        }
+    }
+}
+
+/// The entries matching `needle`, best first.
+///
+/// `services` arrives as names rather than being read from config, so this stays
+/// a pure function of its arguments.
+pub fn filter(needle: &str, services: &[String]) -> Vec<Entry> {
+    let all = ACTIONS
+        .iter()
+        .map(Entry::Key)
+        .chain(
+            services
+                .iter()
+                .enumerate()
+                .map(|(index, name)| Entry::Service {
+                    name: name.clone(),
+                    index,
+                }),
+        );
+
+    let mut scored: Vec<(u32, Entry)> = all
+        .filter_map(|entry| {
+            score_entry(needle, &entry.label(), entry.category()).map(|points| (points, entry))
+        })
+        .collect();
+
+    // Stable, so an empty needle keeps the table's grouping.
+    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    scored.into_iter().map(|(_, entry)| entry).collect()
+}
+
 /// How well `needle` matches `haystack`, or `None` if it does not.
 ///
 /// A greedy left-to-right subsequence walk: not the optimal alignment fzf finds
 /// by dynamic programming, but indistinguishable across 41 short labels.
+/// How well `needle` matches an entry, or `None` if any of its words match
+/// neither the label nor the category.
+///
+/// Each word is scored against the two fields separately and takes its better
+/// result. Scoring against them joined would let one word straddle the boundary,
+/// and a word every entry in a category shares would then outweigh the word that
+/// actually distinguishes them.
+pub fn score_entry(needle: &str, label: &str, category: &str) -> Option<u32> {
+    if needle.trim().is_empty() {
+        return Some(0);
+    }
+    let label: Vec<char> = label.to_lowercase().chars().collect();
+    let category: Vec<char> = category.to_lowercase().chars().collect();
+
+    let mut total = 0u32;
+    for word in needle.split_whitespace() {
+        let in_label = score_word(word, &label);
+        let in_category = score_word(word, &category);
+        total += in_label.max(in_category)?;
+    }
+    Some(total)
+}
+
+/// Each whitespace-separated word is scored on its own, so word order does not
+/// matter.
 pub fn score(needle: &str, haystack: &str) -> Option<u32> {
     if needle.trim().is_empty() {
         return Some(0);
     }
-    let needle: Vec<char> = needle.to_lowercase().chars().collect();
     let hay: Vec<char> = haystack.to_lowercase().chars().collect();
+    let mut total = 0u32;
+    for word in needle.split_whitespace() {
+        total += score_word(word, &hay)?;
+    }
+    Some(total)
+}
 
-    let mut points: u32 = 0;
+fn score_word(word: &str, hay: &[char]) -> Option<u32> {
+    let mut points: i64 = 0;
     let mut next = 0usize;
-    let mut previous_match: Option<usize> = None;
+    let mut previous: Option<usize> = None;
 
-    for wanted in needle {
+    for wanted in word.to_lowercase().chars() {
         let found = hay[next..].iter().position(|c| *c == wanted)? + next;
-        let at_word_start =
-            found == 0 || matches!(hay.get(found - 1), Some(' ') | Some('-') | Some(':'));
         points += 1;
-        if at_word_start {
+        match previous {
+            None => points -= (found as i64).min(3),
+            // Above the word-start bonus, so a contiguous run beats characters
+            // that happen to land on several word starts.
+            Some(prev) if prev + 1 == found => points += 10,
+            Some(prev) => points -= ((found - prev - 1) as i64).min(4),
+        }
+        if found == 0 || matches!(hay.get(found - 1), Some(' ') | Some('-') | Some(':')) {
             points += 8;
         }
-        // Above the word-start bonus, so a contiguous run beats a needle whose
-        // characters happen to land on several word starts.
-        if previous_match == Some(found.saturating_sub(1)) {
-            points += 10;
-        }
-        if previous_match.is_none() {
-            points = points.saturating_sub(found as u32);
-        }
-        previous_match = Some(found);
+        previous = Some(found);
         next = found + 1;
     }
-    Some(points)
+    Some(points.max(0) as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn labels(entries: &[Entry]) -> Vec<String> {
+        entries.iter().map(|e| e.label()).collect()
+    }
+
+    #[test]
+    fn an_empty_needle_returns_every_entry_in_table_order() {
+        let entries = filter("", &[]);
+        assert_eq!(entries.len(), ACTIONS.len());
+        assert_eq!(entries[0].label(), ACTIONS[0].label);
+        assert_eq!(
+            entries[ACTIONS.len() - 1].label(),
+            ACTIONS[ACTIONS.len() - 1].label
+        );
+    }
+
+    #[test]
+    fn one_entry_is_appended_per_configured_service() {
+        let services = vec!["claude".to_string(), "ollama".to_string()];
+        let entries = filter("", &services);
+        assert_eq!(entries.len(), ACTIONS.len() + 2);
+        let found = labels(&entries);
+        assert!(found.contains(&"use model service: claude".to_string()));
+        assert!(found.contains(&"use model service: ollama".to_string()));
+    }
+
+    #[test]
+    fn a_service_entry_carries_its_index() {
+        let services = vec!["claude".to_string(), "ollama".to_string()];
+        let entries = filter("ollama", &services);
+        match entries.first() {
+            Some(Entry::Service { name, index }) => {
+                assert_eq!(name, "ollama");
+                assert_eq!(*index, 1, "the index selects it in config order");
+            }
+            other => panic!("expected a service entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_worked_examples_rank_as_designed() {
+        for (needle, expected) in [
+            ("arf", "archive finished items"),
+            ("mod", "pick the model service"),
+            ("manage", "manage items with the agent"),
+            ("sum", "summarise what's on screen"),
+        ] {
+            let entries = filter(needle, &[]);
+            let top = entries.first().map(|e| e.label()).unwrap_or_default();
+            assert_eq!(top, expected, "{needle:?} should rank {expected:?} first");
+        }
+    }
+
+    #[test]
+    fn the_category_is_searchable_too() {
+        let entries = filter("agent scan", &[]);
+        assert_eq!(
+            entries.first().map(|e| e.label()).unwrap_or_default(),
+            "scan the workspace for changes"
+        );
+    }
+
+    #[test]
+    fn a_needle_matching_nothing_returns_no_entries() {
+        assert!(filter("qqzzxx", &[]).is_empty());
+    }
+
+    // Joining label and category into one haystack would let "scan" match across
+    // the boundary — "…serviceAgent" contains s, c, a, n in order — so a shared
+    // category word would decide instead of the word that distinguishes.
+    #[test]
+    fn a_word_must_match_one_field_rather_than_straddle_two() {
+        assert!(score_entry("agent scan", "scan the workspace for changes", "Agent").is_some());
+        assert_eq!(
+            score_entry("agent scan", "pick the model service", "Agent"),
+            None,
+            "\"scan\" is in neither this label nor its category"
+        );
+    }
+
+    #[test]
+    fn a_word_matching_neither_field_rejects_the_entry() {
+        assert_eq!(
+            score_entry("zebra", "archive finished items", "Groups"),
+            None
+        );
+        assert!(score_entry("groups archive", "archive finished items", "Groups").is_some());
+    }
+
+    #[test]
+    fn a_key_entry_reports_its_display_keys_and_a_service_entry_does_not() {
+        let entries = filter("archive finished", &[]);
+        assert_eq!(entries[0].keys(), "X");
+        assert_eq!(entries[0].category(), "Groups");
+
+        let services = vec!["codex".to_string()];
+        let service = filter("codex", &services);
+        assert_eq!(service[0].keys(), "");
+        assert_eq!(service[0].category(), "Model");
+    }
 
     #[test]
     fn a_subsequence_matches_and_a_non_subsequence_does_not() {
