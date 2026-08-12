@@ -2739,6 +2739,15 @@ mod tests {
         );
     }
 
+    // The count is the whole palette, services included, not just the static
+    // table — otherwise it under-reports what an empty filter would list.
+    #[test]
+    fn the_title_count_includes_the_service_entries() {
+        let app = app_with_services();
+        let total = palette::ACTIONS.len() + app.config_services().len();
+        assert_eq!(app.palette_entries().len(), total);
+    }
+
     #[test]
     fn colon_and_ctrl_k_both_open_the_palette() {
         let mut app = app();

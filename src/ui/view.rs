@@ -416,7 +416,7 @@ fn render_palette(app: &App, frame: &mut Frame, area: Rect) {
                 .title(format!(
                     "palette — {}/{}",
                     entries.len(),
-                    super::palette::ACTIONS.len()
+                    super::palette::ACTIONS.len() + app.config_services().len()
                 )),
         ),
         rect,
