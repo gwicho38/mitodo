@@ -479,7 +479,7 @@ mod tests {
 
     fn item(text: &str, done: bool, priority: Priority) -> Item {
         Item {
-            id: ItemId::compute("f", "s", "h", 0, text),
+            id: ItemId::compute("f", "s", "h", 0, text, 0),
             file: PathBuf::from("f"),
             line: 0,
             indent: 0,

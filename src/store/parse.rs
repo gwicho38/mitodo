@@ -117,6 +117,8 @@ pub fn parse_todo_file(
     let mut heading = String::new();
     // (indent width, index into `items`) for each open ancestor.
     let mut stack: Vec<(usize, usize)> = Vec::new();
+    let mut occurrences: std::collections::HashMap<(String, String, usize, String), usize> =
+        std::collections::HashMap::new();
     let mut last: Option<usize> = None;
 
     for (line_no, raw) in lines.iter().enumerate().skip(start) {
@@ -149,7 +151,15 @@ pub fn parse_todo_file(
             let priority =
                 derive_priority(matcher.as_ref(), priority_config.source, &section, &text);
             let due = derive_due(due_matcher.as_ref(), &text);
-            let id = ItemId::compute(file_rel, &section, &heading, indent, &text);
+            // Identical items in one file are told apart by how many came before.
+            let occurrence = {
+                let key = (section.clone(), heading.clone(), indent, text.clone());
+                let seen = occurrences.entry(key).or_insert(0);
+                let nth = *seen;
+                *seen += 1;
+                nth
+            };
+            let id = ItemId::compute(file_rel, &section, &heading, indent, &text, occurrence);
             let item = Item {
                 id: id.clone(),
                 file: path.to_path_buf(),

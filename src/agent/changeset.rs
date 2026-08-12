@@ -187,23 +187,29 @@ fn find<'a>(items: &'a [Item], path: &Path, needle: &str) -> Option<&'a Item> {
 fn apply_add(path: &Path, items: &[Item], change: &Change) -> Result<(), String> {
     let text = change.content.trim().trim_start_matches("- [ ]").trim();
 
+    // Creating the group is a separate matter; say which file is missing rather
+    // than reporting an absent anchor.
+    if !path.exists() {
+        return Err(format!("add {:?}: {} does not exist", text, path.display()));
+    }
+
     // Anchor to the last item in the requested section, else the last in the
-    // file. Without an anchor there is no safe place to insert.
+    // file, so the file keeps its shape.
     let anchor = items
         .iter()
         .rfind(|i| i.file == path && (change.section.is_empty() || i.section == change.section))
         .or_else(|| items.iter().rfind(|i| i.file == path));
 
-    let Some(anchor) = anchor else {
-        return Err(format!(
-            "add {:?}: no existing item in {} to anchor to",
-            text,
-            path.display()
-        ));
-    };
-
-    store::add_item(path, anchor.line, &anchor.raw, anchor.indent, text)
-        .map_err(|e| describe(e, "add", text))
+    match anchor {
+        Some(anchor) => store::add_item(path, anchor.line, &anchor.raw, anchor.indent, text)
+            .map_err(|e| describe(e, "add", text)),
+        // A group with no items yet has no anchor, but its section headings
+        // still give a position.
+        None => {
+            let section = (!change.section.is_empty()).then_some(change.section.as_str());
+            store::create_item(path, section, text, "", &[]).map_err(|e| describe(e, "add", text))
+        }
+    }
 }
 
 fn apply_complete(path: &Path, items: &[Item], change: &Change) -> Result<(), String> {
@@ -451,6 +457,78 @@ mod tests {
         assert_eq!(changes.open_sub_items(0, dir.path(), &items), 0);
     }
 
+    // A group whose file exists but holds no items yet had no anchor to insert
+    // after, so every add into it was skipped.
+    #[test]
+    fn an_add_into_an_empty_group_file_lands_under_its_heading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newgroup.md");
+        std::fs::write(&path, "## P0 — Critical\n\n## P1 — Later\n\n").unwrap();
+
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"newgroup.md","action":"add","section":"P0","content":"first task","reason":"r"}]}"#);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-12", &[], &changes);
+        assert_eq!(report.applied, 1, "{:?}", report.skipped);
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            written, "## P0 — Critical\n\n- [ ] first task\n## P1 — Later\n\n",
+            "inside the named section, and the other heading is untouched"
+        );
+        let p0 = written.find("## P0").unwrap();
+        let task = written.find("first task").unwrap();
+        let p1 = written.find("## P1").unwrap();
+        assert!(p0 < task && task < p1, "it sits within P0: {written:?}");
+    }
+
+    #[test]
+    fn an_add_into_an_empty_file_with_no_matching_section_is_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newgroup.md");
+        std::fs::write(&path, "## P0 — Critical\n\n").unwrap();
+
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"newgroup.md","action":"add","section":"P9 — Nope","content":"orphan","reason":"r"}]}"#);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-12", &[], &changes);
+        assert_eq!(report.applied, 1, "{:?}", report.skipped);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("- [ ] orphan")
+        );
+    }
+
+    // Creating the group itself is a separate action; say so rather than
+    // reporting a missing anchor.
+    #[test]
+    fn an_add_naming_a_file_that_does_not_exist_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"nosuch.md","action":"add","content":"a task","reason":"r"}]}"#);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-12", &[], &changes);
+        assert_eq!(report.applied, 0);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].contains("nosuch.md") && report.skipped[0].contains("does not exist"),
+            "{:?}",
+            report.skipped
+        );
+    }
+
+    #[test]
+    fn an_add_into_a_group_that_has_items_still_anchors_to_the_last_one() {
+        let (dir, path, items) = workspace(DOC);
+        let changes = set(r#"{"summary":"s","changes":[
+            {"file":"lefv.md","action":"add","section":"P0","content":"another","reason":"r"}]}"#);
+        let report = apply(dir.path(), &HashMap::new(), "2026-08-12", &items, &changes);
+        assert_eq!(report.applied, 1, "{:?}", report.skipped);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            written,
+            "## P0 — Critical\n\n- [ ] alpha\n- [x] beta\n- [ ] another\n"
+        );
+    }
+
     #[test]
     fn parses_the_mcli_scan_shape() {
         let parsed = set(r#"{"summary":"two things","changes":[
@@ -623,16 +701,23 @@ mod tests {
         );
     }
 
+    // This once refused, on the grounds that a file with no items offered no safe
+    // insertion point. Section headings do offer one, and the new-item dialog was
+    // already using it, so the first item in a group is placed rather than
+    // rejected. Refusal is kept only for a file that does not exist.
     #[test]
-    fn adding_to_a_file_with_no_items_is_skipped_not_guessed() {
-        let (dir, _path, items) = workspace("## P0 — Critical\n");
+    fn adding_the_first_item_to_a_file_places_it_under_its_heading() {
+        let (dir, path, items) = workspace("## P0 — Critical\n");
         let changes = set(
             r#"{"summary":"","changes":[{"file":"lefv.md","action":"add",
                 "content":"first ever","reason":"r"}]}"#,
         );
         let report = apply(dir.path(), &HashMap::new(), "2026-08-11", &items, &changes);
-        assert_eq!(report.applied, 0);
-        assert!(report.skipped[0].contains("no existing item"));
+        assert_eq!(report.applied, 1, "{:?}", report.skipped);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "## P0 — Critical\n- [ ] first ever\n"
+        );
     }
 
     #[test]

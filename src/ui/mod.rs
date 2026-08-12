@@ -2377,7 +2377,7 @@ mod tests {
 
     fn item(file: &str, text: &str, done: bool) -> Item {
         Item {
-            id: ItemId::compute(file, "P0", "H", 0, text),
+            id: ItemId::compute(file, "P0", "H", 0, text, 0),
             file: PathBuf::from(file),
             line: 0,
             indent: 0,
@@ -2429,6 +2429,7 @@ mod tests {
                 command: vec!["echo".to_string()],
                 schema_mode: crate::config::SchemaMode::Flag,
                 schema_flag: Some("--json-schema".to_string()),
+                prompt_flag: None,
                 timeout_secs: 600,
             },
             crate::config::ServiceConfig {
@@ -2436,6 +2437,7 @@ mod tests {
                 command: vec!["echo".to_string()],
                 schema_mode: crate::config::SchemaMode::Prompt,
                 schema_flag: None,
+                prompt_flag: None,
                 timeout_secs: 300,
             },
         ];
@@ -4256,7 +4258,7 @@ mod tests {
     fn an_item_that_vanished_is_reported_not_panicked() {
         let (_d, mut app) = disk_app(DOC);
         acted(&mut app, "did it", true);
-        app.acted_on = Some(ItemId::compute("gone", "gone", "gone", 0, "gone"));
+        app.acted_on = Some(ItemId::compute("gone", "gone", "gone", 0, "gone", 0));
         press(&mut app, KeyCode::Char('y'));
 
         assert!(

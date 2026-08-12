@@ -1368,7 +1368,7 @@ mod tests {
 
     fn item(text: &str, done: bool, indent: usize) -> Item {
         Item {
-            id: ItemId::compute("lefv/TODO.md", "P0", "H", indent, text),
+            id: ItemId::compute("lefv/TODO.md", "P0", "H", indent, text, 0),
             file: PathBuf::from("/w/lefv/TODO.md"),
             line: 0,
             indent,

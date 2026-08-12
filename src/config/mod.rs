@@ -146,6 +146,12 @@ pub struct ServiceConfig {
     pub schema_mode: SchemaMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_flag: Option<String>,
+    /// Flag the prompt is passed behind, when the tool has one.
+    ///
+    /// Without it the prompt is the last positional argument, which a variadic
+    /// flag earlier in the command silently swallows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_flag: Option<String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
 }
@@ -241,6 +247,7 @@ impl Config {
             command: self.agent.command.clone(),
             schema_mode: SchemaMode::Flag,
             schema_flag: self.agent.schema_flag.clone(),
+            prompt_flag: None,
             timeout_secs: self.agent.timeout_secs,
         }]
     }

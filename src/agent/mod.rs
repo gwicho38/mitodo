@@ -215,6 +215,9 @@ pub fn run(
         }
     };
 
+    if let Some(flag) = &service.prompt_flag {
+        cmd.arg(flag);
+    }
     cmd.arg(&prompt)
         .current_dir(cwd)
         // Nested inside an agent session this makes the child see itself.
@@ -646,6 +649,7 @@ mod tests {
             command: command.iter().map(|s| s.to_string()).collect(),
             schema_mode: mode,
             schema_flag: flag.map(|f| f.to_string()),
+            prompt_flag: None,
             timeout_secs: 30,
         }
     }
@@ -659,6 +663,42 @@ mod tests {
             dir.path(),
             &Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    // `claude --allowedTools` takes a space-separated list, so a positional
+    // prompt after it is read as one more tool name and never reaches the model.
+    #[test]
+    fn a_variadic_flag_swallows_a_positional_prompt() {
+        let svc = service(
+            &["echo", "--allowedTools", "mcp__mitodo__add_item"],
+            SchemaMode::Prompt,
+            None,
+        );
+        let out = go(&svc, "MY-PROMPT").unwrap();
+        assert!(
+            out.contains("--allowedTools mcp__mitodo__add_item MY-PROMPT"),
+            "the prompt is just another word in the list: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_prompt_flag_keeps_the_prompt_out_of_a_variadic_list() {
+        let mut svc = service(
+            &["echo", "--allowedTools", "mcp__mitodo__add_item"],
+            SchemaMode::Prompt,
+            None,
+        );
+        svc.prompt_flag = Some("-p".to_string());
+        let out = go(&svc, "MY-PROMPT").unwrap();
+        assert!(out.contains("-p MY-PROMPT"), "behind its own flag: {out:?}");
+    }
+
+    #[test]
+    fn without_a_prompt_flag_the_prompt_stays_positional() {
+        // Flag mode with no flag adds nothing, so the prompt stands alone.
+        let svc = service(&["echo"], SchemaMode::Flag, None);
+        let out = go(&svc, "MY-PROMPT").unwrap();
+        assert_eq!(out.trim_end(), "MY-PROMPT");
     }
 
     #[test]
