@@ -1409,7 +1409,7 @@ impl App {
                     ticker.speed_down();
                 }
             }
-            (K::Char('?'), _) => self.open_modal("keys", help_lines()),
+            (K::Char('?'), _) => self.open_modal("keys", palette::help_lines()),
             (K::Char('v'), KeyModifiers::NONE) => {
                 self.view_cursor = 0;
                 self.mode = Mode::ViewMenu;
@@ -2187,50 +2187,6 @@ fn fail(verb: Verb, body: String) -> Event {
         title: format!("{} failed", verb.label()),
         body,
     }
-}
-
-fn help_lines() -> Vec<String> {
-    [
-        "navigation",
-        "  ↑/↓  move             g/G  first/last",
-        "  →/←  expand / collapse a node",
-        "  h/j/k/l  move between panes · tab items · shift-tab groups",
-        "",
-        "items",
-        "  space/x  toggle done   a  new item · o  quick add · A  add child",
-        "  e  edit text          i  edit notes in the detail pane",
-        "     while editing notes: ctrl-s saves · esc discards",
-        "  z  fold / unfold       Z  fold / unfold all",
-        "  d  delete             H  hide done",
-        "",
-        "query",
-        "  /  edit query         esc  clear query",
-        "",
-        "agent and sync",
-        "  n  natural language to query",
-        "  S  summarise the view · E  explain this item",
-        "  b  break this item into sub-items",
-        "  !  ask an agent to act on this item",
-        "  R  scan for changes   M  manage items with the agent",
-        "  m  pick model service  esc  cancel a running call",
-        "  s  git sync",
-        "",
-        "chyron",
-        "  c  toggle ticker      p  pause",
-        "",
-        "groups",
-        "  N  read the selected group's notes.md",
-        "  X  archive finished items into _archive/",
-        "  +/-  faster/slower",
-        "",
-        "view",
-        "  v  view settings (wrap, hide done, ticker)",
-        "",
-        "  ?  this help          q  quit",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
 }
 
 fn within(rect: Rect, x: u16, y: u16) -> bool {
@@ -4093,7 +4049,12 @@ mod tests {
         assert_eq!(app.mode, Mode::Modal);
         let (title, body) = app.modal.clone().unwrap();
         assert_eq!(title, "keys");
-        assert!(body.join("\n").contains("space/x"));
+        let text = body.join("\n");
+        assert!(text.contains("space / x"));
+        // Generated from the action table, so bindings the old hand-written
+        // help had drifted past are listed now.
+        assert!(text.contains("quick add sibling"), "{text}");
+        assert!(text.contains("fold or unfold everything"), "{text}");
     }
 
     #[test]

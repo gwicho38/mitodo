@@ -311,6 +311,25 @@ pub const ACTIONS: [Action; 41] = [
     },
 ];
 
+/// The `?` screen, grouped by category.
+///
+/// Generated from `ACTIONS` so a new binding cannot be added to the palette and
+/// forgotten here.
+pub fn help_lines() -> Vec<String> {
+    let mut lines = vec![
+        "  :  or  ctrl-k   command palette — type to filter, enter to run".to_string(),
+        String::new(),
+    ];
+    for category in Category::ALL {
+        lines.push(category.label().to_string());
+        for action in ACTIONS.iter().filter(|a| a.category == category) {
+            lines.push(format!("  {:<10} {}", action.keys, action.label));
+        }
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// One row of the palette.
 ///
 /// A service is not a keypress — picking one calls into the service list by
@@ -441,6 +460,40 @@ fn score_word(word: &str, hay: &[char]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_help_screen_lists_every_action() {
+        let text = help_lines().join("\n");
+        for action in ACTIONS {
+            assert!(text.contains(action.label), "help omits {:?}", action.label);
+            assert!(
+                text.contains(action.keys),
+                "help omits key {:?}",
+                action.keys
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_screen_is_grouped_by_category() {
+        let text = help_lines().join("\n");
+        for category in Category::ALL {
+            assert!(
+                text.contains(category.label()),
+                "help omits the {} heading",
+                category.label()
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_screen_mentions_the_palette_itself() {
+        let text = help_lines().join("\n");
+        assert!(
+            text.contains(':'),
+            "the palette key is worth finding: {text}"
+        );
+    }
 
     fn labels(entries: &[Entry]) -> Vec<String> {
         entries.iter().map(|e| e.label()).collect()
