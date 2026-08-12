@@ -2429,6 +2429,7 @@ mod tests {
                 command: vec!["echo".to_string()],
                 schema_mode: crate::config::SchemaMode::Flag,
                 schema_flag: Some("--json-schema".to_string()),
+                prompt_flag: None,
                 timeout_secs: 600,
             },
             crate::config::ServiceConfig {
@@ -2436,6 +2437,7 @@ mod tests {
                 command: vec!["echo".to_string()],
                 schema_mode: crate::config::SchemaMode::Prompt,
                 schema_flag: None,
+                prompt_flag: None,
                 timeout_secs: 300,
             },
         ];
