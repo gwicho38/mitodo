@@ -129,6 +129,7 @@ Arrows work the list and the tree; `hjkl` moves between panes.
 
 | | | | |
 |---|---|---|---|
+| `:` `ctrl-k` | command palette | `?` | help |
 | `↑` `↓` | move / scroll | `space` `x` | toggle done |
 | `→` | open a node, then step into it | `a` | new item (dialog) |
 | | | `o` `A` | quick add sibling / child |
@@ -140,7 +141,25 @@ Arrows work the list and the tree; `hjkl` moves between panes.
 | `v` | view settings | `c` | scrolling ticker |
 | `m` | pick model service | `M` | manage items with the agent |
 | `N` | read group notes | `X` | archive finished |
-| `?` | help | `q` | quit |
+| `q` | quit | | |
+
+## The command palette
+
+`:` or `ctrl-k` opens a palette over every action in the app. Type to filter —
+`arf` finds "archive finished items", `gs` finds "git sync" — `↑`/`↓` or
+`ctrl-p`/`ctrl-n` to move, `enter` to run, `esc` to close. Clicking a row runs
+it; clicking outside closes.
+
+Each row shows its key on the right, so using the palette teaches you the
+binding and you stop needing it. Configured model services appear as entries
+too, so `:ollama` switches model in a few keystrokes.
+
+Words are matched independently, against either the label or its category, so
+`agent scan` and `scan agent` both find the scan verb.
+
+The palette implements nothing: an entry presses the key it names, so it behaves
+exactly as that key does. `?` prints the same table as a static reference,
+generated from the same source.
 
 The panes sit groups-left, items above detail on the right, and `hjkl` follows
 that layout: `h` from either right-hand pane goes to the groups list, `l` goes
