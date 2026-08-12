@@ -180,9 +180,18 @@ struct Workspace {
 }
 ```
 
-`ItemId` is a content hash, matching the scheme used by the author's
-`todos-mcp` server. Both tools therefore agree on item identity, and a
-text-changing edit invalidates the old id in both.
+`ItemId` is a content hash over
+`(file, section, heading, indent, text, occurrence)`. A text-changing edit
+invalidates the old id.
+
+**Correction (2026-08-12):** this section claimed the scheme matched the author's
+`todos-mcp` server so that "both tools agree on item identity". It never did, and
+was never tested. mitodo uses sha256 truncated to 12 hex over the tuple above;
+todos-mcp uses blake2b truncated to 16 hex over
+`(file, heading_path, normalized_text, occurrence_index)`. For the same item the
+two produce `b5795463985e` and `bb0f022283041cab` respectively. The `occurrence`
+field was added to mitodo's payload in this correction, because without it two
+items alike in text, section, heading and indent shared an id.
 
 `Priority` is `P0 | P1 | P2 | P3 | None`, derived from whichever source the
 config names.

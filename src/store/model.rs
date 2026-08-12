@@ -44,9 +44,10 @@ impl Priority {
 
 /// Content-addressed item identifier.
 ///
-/// Deliberately derived from content rather than position: a text edit yields a
-/// new id, which matches the scheme used by the `todos-mcp` server so both
-/// tools agree on item identity.
+/// Derived from content rather than position, so a text edit yields a new id and
+/// a moved item keeps its own. `occurrence` counts identical items earlier in the
+/// same file: without it, two items alike in text, section, heading and indent
+/// share an id, and anything addressing items by id can write to the wrong one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(String);
 
@@ -57,6 +58,7 @@ impl ItemId {
         heading: &str,
         indent: usize,
         text: &str,
+        occurrence: usize,
     ) -> Self {
         let mut hasher = Sha256::new();
         // Unit separator between fields so that concatenation is unambiguous.
@@ -67,6 +69,8 @@ impl ItemId {
         hasher.update(indent.to_string().as_bytes());
         hasher.update([0x1f]);
         hasher.update(text.as_bytes());
+        hasher.update([0x1f]);
+        hasher.update(occurrence.to_string().as_bytes());
         let digest = hasher.finalize();
         ItemId(hex_12(&digest))
     }
@@ -140,34 +144,92 @@ mod tests {
 
     #[test]
     fn item_id_is_stable_for_identical_content() {
-        let a = ItemId::compute("lefv/TODO.md", "P0", "Prefecture", 0, "Check convocation");
-        let b = ItemId::compute("lefv/TODO.md", "P0", "Prefecture", 0, "Check convocation");
+        let a = ItemId::compute(
+            "lefv/TODO.md",
+            "P0",
+            "Prefecture",
+            0,
+            "Check convocation",
+            0,
+        );
+        let b = ItemId::compute(
+            "lefv/TODO.md",
+            "P0",
+            "Prefecture",
+            0,
+            "Check convocation",
+            0,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn item_id_changes_when_text_changes() {
-        let a = ItemId::compute("lefv/TODO.md", "P0", "Prefecture", 0, "Check convocation");
+        let a = ItemId::compute(
+            "lefv/TODO.md",
+            "P0",
+            "Prefecture",
+            0,
+            "Check convocation",
+            0,
+        );
         let b = ItemId::compute(
             "lefv/TODO.md",
             "P0",
             "Prefecture",
             0,
             "Check convocation now",
+            0,
         );
         assert_ne!(a, b);
     }
 
     #[test]
     fn item_id_distinguishes_same_text_in_different_files() {
-        let a = ItemId::compute("lefv/TODO.md", "P0", "H", 0, "same text");
-        let b = ItemId::compute("jzlaw/TODO.md", "P0", "H", 0, "same text");
+        let a = ItemId::compute("lefv/TODO.md", "P0", "H", 0, "same text", 0);
+        let b = ItemId::compute("jzlaw/TODO.md", "P0", "H", 0, "same text", 0);
         assert_ne!(a, b);
+    }
+
+    // Two items can be identical in text, section, heading and indent. Without
+    // the occurrence index they shared an id, and a tool addressing items by id
+    // would write to whichever one it found first.
+    #[test]
+    fn item_id_distinguishes_repeated_occurrences() {
+        let first = ItemId::compute("lefv/TODO.md", "P0", "H", 0, "call the bank", 0);
+        let second = ItemId::compute("lefv/TODO.md", "P0", "H", 0, "call the bank", 1);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn duplicate_items_in_one_file_all_get_distinct_ids() {
+        use crate::config::{DueConfig, PriorityConfig};
+        use crate::store::parse_todo_file;
+        let body = concat!(
+            "## P0 — Critical\n\n",
+            "- [ ] call the bank\n",
+            "- [ ] call the bank\n",
+            "- [ ] alpha\n",
+            "  - [ ] ping\n",
+            "- [ ] beta\n",
+            "  - [ ] ping\n",
+        );
+        let items = parse_todo_file(
+            std::path::Path::new("/w/lefv/TODO.md"),
+            "lefv/TODO.md",
+            body,
+            &PriorityConfig::default(),
+            &DueConfig::default(),
+        );
+        assert_eq!(items.len(), 6);
+        let distinct: std::collections::HashSet<&str> =
+            items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(distinct.len(), items.len(), "every id is unique");
     }
 
     #[test]
     fn item_id_is_twelve_hex_chars() {
-        let id = ItemId::compute("f", "s", "h", 0, "t");
+        let id = ItemId::compute("f", "s", "h", 0, "t", 0);
         assert_eq!(id.as_str().len(), 12);
         assert!(id.as_str().chars().all(|c| c.is_ascii_hexdigit()));
     }
