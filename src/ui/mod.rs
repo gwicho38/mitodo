@@ -1,5 +1,6 @@
 pub mod chyron;
 pub mod edit;
+pub mod palette;
 mod view;
 pub mod wrap;
 

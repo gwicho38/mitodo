@@ -219,8 +219,8 @@ score(needle, haystack) -> Option<u32>        pure, ~35 lines
   greedy left-to-right subsequence walk; any unmatched needle character → None
 
   per matched character:
+      +10  contiguous with the previous match
       +8   at a word start (index 0, or the previous character is space, - or :)
-      +4   contiguous with the previous match
       +1   base
       -1   per character skipped before the first match
 ```
@@ -237,6 +237,11 @@ grouping.
 | `manage` | manage items with the agent | contiguous run at index 0 |
 | `sum` | summarise what's on screen | contiguous at a word start |
 | `ollama` | use model service: ollama | contiguous, dynamic entry |
+
+Contiguity outweighs the word-start bonus deliberately. With the reverse
+weighting, `arch` scored higher against "a rather cheap thing" — four
+coincidental word starts — than against "archive items", because four `+8`
+bonuses beat one `+8` plus three smaller contiguity bonuses.
 
 **Known limitation.** Greedy leftmost matching is not optimal — fzf runs
 dynamic programming to find the best alignment; this takes the first one. A

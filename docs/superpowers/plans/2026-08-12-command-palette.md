@@ -271,8 +271,10 @@ pub fn score(needle: &str, haystack: &str) -> Option<u32> {
         if at_word_start {
             points += 8;
         }
+        // Above the word-start bonus, so a contiguous run beats a needle whose
+        // characters happen to land on several word starts.
         if previous_match == Some(found.saturating_sub(1)) {
-            points += 4;
+            points += 10;
         }
         if previous_match.is_none() {
             points = points.saturating_sub(found as u32);
