@@ -388,7 +388,7 @@ pub fn filter(needle: &str, services: &[String]) -> Vec<Entry> {
         .collect();
 
     // Stable, so an empty needle keeps the table's grouping.
-    scored.sort_by(|left, right| right.0.cmp(&left.0));
+    scored.sort_by_key(|scored| std::cmp::Reverse(scored.0));
     scored.into_iter().map(|(_, entry)| entry).collect()
 }
 
