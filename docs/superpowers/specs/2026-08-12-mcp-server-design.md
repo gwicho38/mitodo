@@ -229,10 +229,14 @@ eight writes and `todos_sync` — against todos-mcp's ten.
   alone edits, `done` alone toggles, both do both in one write, and the returned
   item carries the new id when the text changed. Neither argument given is a
   `validation_error`.
-- **`todos_create_item` never invents a `## Pn` section.** With `priority` given
-  and no matching section in the file, it fails `missing_priority_section` —
-  todos-mcp's rule, kept, because inventing sections reshapes a file the user
-  formats by hand.
+- **`todos_create_item` never invents a `## Pn` section.** With `section` given
+  and no `## ` heading in the file starting with it, the tool fails
+  `missing_priority_section` and writes nothing. todos-mcp's rule, kept for a
+  sharper reason than file formatting: `store::create_item` would otherwise append
+  at end of file, and because priority is *derived from the heading above an
+  item*, the agent would be told it filed a P0 that is not one. The check reads
+  the file's `## ` headings before writing; matching is case-insensitive on the
+  prefix, so `"P0"` matches `## P0 — Critical`.
 - **`section` rather than `heading_path` here.** mitodo's parser carries a
   two-level `section` + `heading`, and `store::create_item` already places by
   section. Accepting a full path would mean either flattening it silently or
