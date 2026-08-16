@@ -4,6 +4,7 @@ mod config;
 mod git;
 mod input;
 mod logging;
+mod mcp;
 mod messages;
 mod prelude;
 mod query;
@@ -35,8 +36,17 @@ async fn main() -> Result<()> {
     match args.command() {
         Some(Command::Init { root, force }) => cmd_init(root, *force, &config_path),
         Some(Command::List) => cmd_list(&config_path, query.as_deref()),
+        Some(Command::McpServer) => cmd_mcp_server(&config_path),
         None => run_tui(&config_path, query.as_deref()).await,
     }
+}
+
+/// Serve MCP on stdio. No terminal setup: this process has no UI, and anything
+/// written to stdout that is not protocol corrupts the stream.
+fn cmd_mcp_server(config_path: &Path) -> Result<()> {
+    let config = config::Config::load(config_path)?;
+    mcp::serve(&config)?;
+    Ok(())
 }
 
 fn cmd_init(root: &Path, force: bool, config_path: &Path) -> Result<()> {

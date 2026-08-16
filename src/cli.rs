@@ -134,4 +134,6 @@ pub enum Command {
     },
     /// Print the workspace to stdout
     List,
+    /// Serve the workspace to an MCP client over stdio
+    McpServer,
 }

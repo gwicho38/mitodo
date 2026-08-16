@@ -456,6 +456,40 @@ An item whose sub-items are not all finished is left alone and reported, since
 archiving it would hide open work. Descriptions and fully-finished subtrees
 travel with their item.
 
+## Using mitodo from Claude Code or Codex
+
+`mitodo mcp-server` speaks the Model Context Protocol on stdio, so an agent can
+read and manage the workspace itself:
+
+```sh
+claude --strict-mcp-config \
+  --mcp-config '{"mcpServers":{"mitodo":{"command":"mitodo","args":["mcp-server"]}}}' \
+  -p 'archive the everlongtech items that closed, and add a P1 to chase Sam'
+```
+
+Codex reads the same server from its own config:
+
+```sh
+codex mcp add mitodo -- mitodo mcp-server
+```
+
+Thirteen tools: `todos_list`, `todos_get_item`, `todos_get_file`,
+`todos_list_groups`, `todos_create_item`, `todos_add_child`, `todos_update_item`,
+`todos_set_notes`, `todos_delete_item`, `todos_archive_item`,
+`todos_archive_finished`, `todos_create_group` and `todos_sync`. `todos_list`
+takes the same query language the TUI uses, so `pri:P0 !done` works there too.
+
+Writes go through the same conflict-aware writer the TUI uses, so a stale edit is
+refused rather than forced, and every line you did not change stays
+byte-identical. **There is no review step:** an agent's writes take effect
+immediately, and your workspace being a git repository is the undo. If the TUI is
+open it picks the changes up through its file watcher.
+
+Tools take a group *name*, never a path, so an agent cannot address anything
+outside the workspace. Naming a section that does not exist is refused rather
+than written at the end of the file, because priority comes from the heading
+above an item — an agent asking for P0 is never quietly given something else.
+
 ## Credits
 
 mitodo is a fork of [eilmeldung](https://github.com/christo-auer/eilmeldung) by
