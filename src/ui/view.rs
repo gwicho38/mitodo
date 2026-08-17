@@ -170,13 +170,30 @@ pub fn new_item_layout(area: Rect, new: &NewItem) -> NewItemLayout {
     let mut fields = Vec::new();
     let mut bands = Vec::new();
 
+    // Content is wrapped when drawn, so a field is as tall as its wrapped rows,
+    // not its logical lines: counting lines would slide every target below it.
+    let wrapped_rows = |editor: &super::edit::Editor| -> u16 {
+        let inner = width.saturating_sub(4).max(1) as usize;
+        editor
+            .lines()
+            .iter()
+            .map(|logical| {
+                if logical.is_empty() {
+                    1
+                } else {
+                    wrap_text(logical, inner).len() as u16
+                }
+            })
+            .sum()
+    };
+
     for field in NewField::ALL {
         y += 1; // the label row
         let rows = match field {
             NewField::Priority => 1u16,
-            NewField::Title => new.title.lines().len() as u16,
-            NewField::Notes => new.notes.lines().len() as u16,
-            NewField::SubItems => new.sub_items.lines().len() as u16,
+            NewField::Title => wrapped_rows(&new.title),
+            NewField::Notes => wrapped_rows(&new.notes),
+            NewField::SubItems => wrapped_rows(&new.sub_items),
         };
         let rect = Rect {
             x: left,
@@ -279,14 +296,32 @@ fn render_new_item(app: &App, frame: &mut Frame, area: Rect) {
                     _ => &new.sub_items,
                 };
                 let (row, col) = editor.cursor();
-                for (index, text) in editor.lines().iter().enumerate() {
-                    if is_focused && index == row {
-                        caret = Some((4 + col as u16, lines.len() as u16));
+                let width = inner.saturating_sub(4).max(1);
+                for (index, logical) in editor.lines().iter().enumerate() {
+                    let segments = if logical.is_empty() {
+                        vec![String::new()]
+                    } else {
+                        wrap_text(logical, width)
+                    };
+                    let mut consumed = 0usize;
+                    for (n, segment) in segments.iter().enumerate() {
+                        if is_focused && index == row {
+                            let len = segment.chars().count();
+                            let last = n + 1 == segments.len();
+                            if col >= consumed && (col <= consumed + len || last) {
+                                caret = Some((
+                                    4 + (col - consumed).min(len) as u16,
+                                    lines.len() as u16,
+                                ));
+                            }
+                            // Wrapping drops the space the words were split on.
+                            consumed += len + 1;
+                        }
+                        lines.push(Line::from(Span::styled(
+                            format!("    {segment}"),
+                            theme.command_input(),
+                        )));
                     }
-                    lines.push(Line::from(Span::styled(
-                        format!("    {}", truncate(text, inner.saturating_sub(4))),
-                        theme.command_input(),
-                    )));
                 }
             }
         }
@@ -1505,6 +1540,117 @@ mod tests {
             draw_app(&app, 90, 24)
                 .join("\n")
                 .contains(&format!("due {expected}"))
+        );
+    }
+
+    /// The dialog with a long note typed into it, ready to draw.
+    fn app_with_long_note() -> App {
+        let mut app = test_app();
+        app.mode = Mode::NewItem;
+        app.new_item.field = 2;
+        app.new_item.notes = crate::ui::edit::Editor::new(
+            "Last conversation was about next steps with David. He needed to finish the review before we could file anything.",
+        );
+        app
+    }
+
+    // Truncating hid whatever was typed past the pane's width: you could not see
+    // what you were writing.
+    #[test]
+    fn a_long_note_wraps_inside_the_dialog_instead_of_being_cut() {
+        let app = app_with_long_note();
+        let rows = draw_app(&app, 100, 40);
+        let popup = new_item_rect(Rect::new(0, 0, 100, 40));
+
+        let inside: Vec<&String> = rows
+            .iter()
+            .skip(popup.y as usize)
+            .take(popup.height as usize)
+            .collect();
+        let carrying: Vec<&&String> = inside
+            .iter()
+            .filter(|row| row.contains("conversation") || row.contains("review before"))
+            .collect();
+        assert!(
+            carrying.len() >= 2,
+            "the note should occupy more than one row: {inside:#?}"
+        );
+        assert!(
+            inside.iter().any(|row| row.contains("file anything")),
+            "the end of the note should be visible somewhere: {inside:#?}"
+        );
+    }
+
+    // The caret was placed at the raw column, so it left the dialog entirely.
+    #[test]
+    fn the_caret_stays_inside_the_dialog_however_long_the_note() {
+        let app = app_with_long_note();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(&app, frame);
+            })
+            .unwrap();
+        let caret = terminal.get_cursor_position().unwrap();
+        let popup = new_item_rect(Rect::new(0, 0, 100, 40));
+
+        assert!(
+            caret.x > popup.x && caret.x < popup.x + popup.width - 1,
+            "caret x {} is outside the dialog spanning {}..{}",
+            caret.x,
+            popup.x,
+            popup.x + popup.width
+        );
+        assert!(
+            caret.y > popup.y && caret.y < popup.y + popup.height - 1,
+            "caret y {} is outside the dialog spanning {}..{}",
+            caret.y,
+            popup.y,
+            popup.y + popup.height
+        );
+    }
+
+    #[test]
+    fn nothing_is_drawn_past_the_dialogs_right_border() {
+        let app = app_with_long_note();
+        let rows = draw_app(&app, 100, 40);
+        let popup = new_item_rect(Rect::new(0, 0, 100, 40));
+        let right = (popup.x + popup.width - 1) as usize;
+
+        for (index, row) in rows
+            .iter()
+            .enumerate()
+            .skip(popup.y as usize)
+            .take(popup.height as usize)
+        {
+            let border: Vec<char> = row.chars().collect();
+            assert!(
+                border
+                    .get(right)
+                    .is_some_and(|c| *c == '│' || *c == '┐' || *c == '┘' || *c == '─'),
+                "row {index} does not end in the dialog border at column {right}: {row:?}"
+            );
+        }
+    }
+
+    // Wrapping makes a field taller than its logical line count, so the click
+    // targets below it must move with the rendered rows, not the line count.
+    #[test]
+    fn a_wrapped_note_keeps_the_sub_items_click_target_on_its_label() {
+        let app = app_with_long_note();
+        let frame = Rect::new(0, 0, 100, 40);
+        let rows = draw_app(&app, 100, 40);
+        let layout = new_item_layout(frame, &app.new_item);
+
+        let sub_items = layout.fields[NewField::SubItems as usize];
+        let rendered = rows
+            .get(sub_items.y as usize)
+            .map(|row| row.as_str())
+            .unwrap_or("");
+        assert!(
+            rendered.contains("sub-items"),
+            "the sub-items click target is at row {} which renders {rendered:?}",
+            sub_items.y
         );
     }
 
