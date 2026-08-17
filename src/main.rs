@@ -8,6 +8,7 @@ mod mcp;
 mod messages;
 mod prelude;
 mod query;
+mod selfcfg;
 mod store;
 mod ui;
 
