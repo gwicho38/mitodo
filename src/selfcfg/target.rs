@@ -25,7 +25,6 @@ pub struct Target {
 }
 
 /// Clients seen on this machine that mitodo deliberately does not touch.
-#[allow(dead_code)] // consumed by the verbs in the next commit
 pub fn unsupported() -> Vec<(&'static str, &'static str)> {
     vec![
         (
@@ -40,7 +39,6 @@ pub fn unsupported() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Where Claude Desktop keeps its config, when the app is installed.
-#[allow(dead_code)] // consumed by the verbs in the next commit
 pub fn desktop_config_path() -> Option<PathBuf> {
     let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
     let dir = home
@@ -50,7 +48,6 @@ pub fn desktop_config_path() -> Option<PathBuf> {
     dir.is_dir().then(|| dir.join("claude_desktop_config.json"))
 }
 
-#[allow(dead_code)] // consumed by the verbs in the next commit
 pub fn detect() -> Vec<Target> {
     detect_in(&which, desktop_config_path())
 }
@@ -87,7 +84,6 @@ pub fn detect_in(has_cli: &dyn Fn(&str) -> bool, desktop: Option<PathBuf>) -> Ve
 }
 
 /// Whether a command resolves on PATH.
-#[allow(dead_code)] // consumed by the verbs in the next commit
 fn which(cli: &str) -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(cli).is_file()))
