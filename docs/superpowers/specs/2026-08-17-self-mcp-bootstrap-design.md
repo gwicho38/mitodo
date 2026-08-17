@@ -75,8 +75,9 @@ absolute path works in both places, so both get one.
 `$XDG_CONFIG_HOME/mitodo/config.toml`, else `~/.config/mitodo/config.toml`, at run
 time — the same file the TUI reads. One registration therefore follows the config
 wherever it points, which matters when the same config is kept byte-identical
-across machines. `setup --config-dir <dir>` pins a specific one for a second
-registration under a different name (`--name`).
+across machines. A second registration pinned to a
+different workspace would need `--config-dir` and `--name`; §8 records those as
+unbuilt, since one registration that follows the config covers both machines.
 
 **`--scope user` for `claude`.** Its default is `local`, which registers only for
 the current directory; a todo server is not directory-scoped.
@@ -220,6 +221,9 @@ on both machines after merge.
   is a later, mechanical change
 - HTTP/SSE transports: mitodo's server is stdio only
 - Registering anything other than mitodo itself
+- `setup --config-dir <dir>` and `--name`, for a second registration pinned to a
+  different workspace. §3 describes them as the escape hatch, but nothing needs
+  one yet: the default registration follows the config file wherever it points.
 - `self` verbs beyond `mcp` (`self update`, `self doctor`) — the namespace exists
   so they have somewhere to go, not because they are planned here
 
