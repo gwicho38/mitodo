@@ -459,18 +459,38 @@ travel with their item.
 ## Using mitodo from Claude Code or Codex
 
 `mitodo mcp-server` speaks the Model Context Protocol on stdio, so an agent can
-read and manage the workspace itself:
+read and manage the workspace itself. Register it once:
+
+```sh
+mitodo self mcp setup
+```
+
+That writes mitodo's absolute path into every supported client it finds —
+`claude` and `codex` through their own `mcp add`, and Claude Desktop by merging a
+single key into its config, leaving every other server and setting untouched.
+Re-run it after any reinstall: it reports `already current`, or re-points a path
+that has moved.
+
+```sh
+mitodo self mcp status              # where it is registered, and whether the path resolves
+mitodo self mcp setup --dry-run     # what would change, changing nothing
+mitodo self mcp remove              # unregister everywhere
+```
+
+`opencode` and Zed are detected but skipped, and `status` says why: `opencode mcp
+add` takes no arguments to script, and Zed's settings are JSONC, so rewriting them
+would delete your comments.
+
+The absolute path matters. Claude Desktop is launched by the GUI and inherits no
+shell `PATH`, so a bare `mitodo` would work from a terminal and fail silently in
+the app.
+
+Registering by hand still works:
 
 ```sh
 claude --strict-mcp-config \
   --mcp-config '{"mcpServers":{"mitodo":{"command":"mitodo","args":["mcp-server"]}}}' \
   -p 'archive the everlongtech items that closed, and add a P1 to chase Sam'
-```
-
-Codex reads the same server from its own config:
-
-```sh
-codex mcp add mitodo -- mitodo mcp-server
 ```
 
 Thirteen tools: `todos_list`, `todos_get_item`, `todos_get_file`,

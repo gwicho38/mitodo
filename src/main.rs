@@ -8,6 +8,7 @@ mod mcp;
 mod messages;
 mod prelude;
 mod query;
+mod selfcfg;
 mod store;
 mod ui;
 
@@ -37,8 +38,26 @@ async fn main() -> Result<()> {
         Some(Command::Init { root, force }) => cmd_init(root, *force, &config_path),
         Some(Command::List) => cmd_list(&config_path, query.as_deref()),
         Some(Command::McpServer) => cmd_mcp_server(&config_path),
+        Some(Command::Selfie { action }) => cmd_self(action),
         None => run_tui(&config_path, query.as_deref()).await,
     }
+}
+
+/// Registering with other tools writes outside mitodo's own files, so every
+/// target's outcome is printed and the exit code says whether any failed.
+fn cmd_self(action: &cli::SelfAction) -> Result<()> {
+    let cli::SelfAction::Mcp { action } = action;
+    let outcomes = match action {
+        cli::McpAction::Setup { dry_run } => selfcfg::setup(*dry_run),
+        cli::McpAction::Status => selfcfg::status(),
+        cli::McpAction::Remove { dry_run } => selfcfg::remove_all(*dry_run),
+    };
+    println!("{}", selfcfg::report(&outcomes));
+    let code = selfcfg::exit_code(&outcomes);
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 /// Serve MCP on stdio. No terminal setup: this process has no UI, and anything

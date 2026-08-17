@@ -136,4 +136,36 @@ pub enum Command {
     List,
     /// Serve the workspace to an MCP client over stdio
     McpServer,
+    /// Manage this installation of mitodo
+    #[command(name = "self")]
+    Selfie {
+        #[command(subcommand)]
+        action: SelfAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SelfAction {
+    /// Register mitodo's MCP server with the clients on this machine
+    Mcp {
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpAction {
+    /// Register with every supported client found
+    Setup {
+        /// Print what would change, and change nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show where mitodo is registered, and whether its path still resolves
+    Status,
+    /// Unregister from every client that has it
+    Remove {
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
