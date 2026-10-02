@@ -20,6 +20,7 @@ pub enum State {
     Failed,
     Unsupported,
     Missing,
+    Warning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +44,41 @@ pub fn plan_entry() -> Result<desktop::Entry, String> {
         command: exe.to_string_lossy().to_string(),
         args: vec!["mcp-server".to_string()],
     })
+}
+
+/// Mount roots for detachable disks: macOS, then the Linux desktop defaults.
+const DETACHABLE_ROOTS: &[&str] = &["/Volumes", "/media", "/run/media"];
+
+/// A warning when `exe` (already canonical) lives on a detachable disk.
+///
+/// An MCP server is a long-lived process that maps its own code from that
+/// file. If the disk drops (sleep, a loose cable), the pages lose their
+/// backing; the next request faults, Rust's SIGBUS handler faults on the same
+/// dead page, and the process spins at full CPU without ever answering. The
+/// client waits forever. Nothing inside the process can recover, so the only
+/// cure is installing the binary on the boot disk.
+pub fn volume_warning(exe: &std::path::Path) -> Option<Outcome> {
+    let root = DETACHABLE_ROOTS.iter().find(|root| {
+        exe.strip_prefix(root)
+            .is_ok_and(|rest| rest.components().count() > 1)
+    })?;
+    Some(Outcome {
+        target: SERVER_NAME.to_string(),
+        state: State::Warning,
+        detail: format!(
+            "{} is on a detachable disk under {root}; if it drops, the server hangs. \
+             Install it on the boot disk (`cargo install --path . --root ~/.local`) \
+             and rerun `mitodo self mcp setup` from there",
+            exe.display()
+        ),
+    })
+}
+
+/// The warning for this binary, judged by where its path really resolves:
+/// `~/.cargo` may itself be a symlink onto an external disk.
+fn this_binary_warning() -> Option<Outcome> {
+    let exe = std::env::current_exe().ok()?;
+    volume_warning(&exe.canonicalize().unwrap_or(exe))
 }
 
 /// The command a client reports for a registered server.
@@ -77,6 +113,7 @@ pub fn setup(dry_run: bool) -> Vec<Outcome> {
         .map(|t| register(t, &entry, dry_run))
         .collect();
     outcomes.extend(unsupported_outcomes());
+    outcomes.extend(this_binary_warning());
     outcomes
 }
 
@@ -87,6 +124,7 @@ pub fn status() -> Vec<Outcome> {
         .map(|t| inspect(t, wanted.as_ref()))
         .collect();
     outcomes.extend(unsupported_outcomes());
+    outcomes.extend(this_binary_warning());
     outcomes
 }
 
@@ -299,6 +337,7 @@ pub fn report(outcomes: &[Outcome]) -> String {
                 State::Failed => ("!", "failed"),
                 State::Unsupported => (" ", "unsupported"),
                 State::Missing => ("!", "path no longer exists"),
+                State::Warning => ("!", "warning"),
             };
             format!("{mark} {:<16} {what} · {}", outcome.target, outcome.detail)
         })
@@ -402,6 +441,7 @@ mod tests {
             State::Failed,
             State::Unsupported,
             State::Missing,
+            State::Warning,
         ] {
             let line = report(&[Outcome {
                 target: "claude".to_string(),
@@ -410,6 +450,51 @@ mod tests {
             }]);
             assert!(line.contains("claude"), "{state:?} omits the target");
             assert!(line.contains("detail"), "{state:?} omits the detail");
+        }
+    }
+
+    // A binary on a detachable disk serves until the disk drops, then hangs
+    // the client: its code pages lose their backing, the next request faults,
+    // and the SIGBUS handler faults on the same dead page forever.
+    #[test]
+    fn a_binary_on_an_external_volume_draws_a_warning() {
+        let outcome = volume_warning(std::path::Path::new(
+            "/Volumes/mac_extended/home_migrated/.cargo/bin/mitodo",
+        ))
+        .expect("an external volume must warn");
+        assert_eq!(outcome.state, State::Warning);
+        assert!(
+            outcome.detail.contains("mac_extended"),
+            "{}",
+            outcome.detail
+        );
+        assert!(
+            outcome.detail.contains("--root"),
+            "the warning says how to move it: {}",
+            outcome.detail
+        );
+        assert_eq!(exit_code(&[outcome]), 0, "a warning alone is not a failure");
+    }
+
+    #[test]
+    fn linux_removable_mounts_draw_a_warning_too() {
+        for path in ["/media/usb/bin/mitodo", "/run/media/me/disk/bin/mitodo"] {
+            assert!(
+                volume_warning(std::path::Path::new(path)).is_some(),
+                "{path} should warn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_binary_on_the_boot_disk_draws_no_warning() {
+        for path in [
+            "/Users/home/.local/bin/mitodo",
+            "/usr/local/bin/mitodo",
+            "/home/me/.cargo/bin/mitodo",
+            "/Volumes",
+        ] {
+            assert_eq!(volume_warning(std::path::Path::new(path)), None, "{path}");
         }
     }
 
