@@ -46,26 +46,35 @@ fn band(marker: &str) -> Priority {
 /// Priority of an item, per the workspace's configuration.
 ///
 /// The same pattern is applied to whichever subject `source` selects: the
-/// section heading, or the item's own text.
+/// section heading, or the item's own text. With heading priorities, a `###`
+/// heading such as `P1 — Deal Docs` supplies the priority when its `##`
+/// section carries none (`## Active Client Matters`); the section wins when
+/// both do.
 fn derive_priority(
     matcher: Option<&Regex>,
     source: PrioritySource,
     section: &str,
+    heading: &str,
     text: &str,
 ) -> Priority {
     let Some(matcher) = matcher else {
         return Priority::None;
     };
-    let subject = match source {
-        PrioritySource::None => return Priority::None,
-        PrioritySource::Heading => section,
-        PrioritySource::Tag => text,
+    let band_of = |subject: &str| {
+        matcher
+            .captures(subject)
+            .and_then(|caps| caps.get(1))
+            .map(|m| band(m.as_str()))
+            .unwrap_or(Priority::None)
     };
-    matcher
-        .captures(subject)
-        .and_then(|caps| caps.get(1))
-        .map(|m| band(m.as_str()))
-        .unwrap_or(Priority::None)
+    match source {
+        PrioritySource::None => Priority::None,
+        PrioritySource::Tag => band_of(text),
+        PrioritySource::Heading => match band_of(section) {
+            Priority::None => band_of(heading),
+            found => found,
+        },
+    }
 }
 
 /// Pull a due date out of an item's text, per the configured pattern.
@@ -148,8 +157,13 @@ pub fn parse_todo_file(
             }
             let parent_idx = stack.last().map(|(_, idx)| *idx);
 
-            let priority =
-                derive_priority(matcher.as_ref(), priority_config.source, &section, &text);
+            let priority = derive_priority(
+                matcher.as_ref(),
+                priority_config.source,
+                &section,
+                &heading,
+                &text,
+            );
             let due = derive_due(due_matcher.as_ref(), &text);
             // Identical items in one file are told apart by how many came before.
             let occurrence = {
@@ -384,6 +398,43 @@ mod tests {
         let items = fixture();
         assert_eq!(items[0].priority, Priority::P0);
         assert_eq!(items[2].priority, Priority::P1);
+    }
+
+    #[test]
+    fn a_priority_heading_inside_an_unprioritised_section_sets_the_priority() {
+        let doc = "## Active Client Matters\n\n### P1 — Deal Docs\n- [ ] draft\n\n### Housekeeping\n- [ ] file\n";
+        let items = parse_todo_file(
+            Path::new("f"),
+            "f",
+            doc,
+            &PriorityConfig {
+                source: PrioritySource::Heading,
+                pattern: "^P([0-3])".to_string(),
+            },
+            &DueConfig::default(),
+        );
+        assert_eq!(items[0].priority, Priority::P1);
+        assert_eq!(
+            items[1].priority,
+            Priority::None,
+            "a plain heading still has none"
+        );
+    }
+
+    #[test]
+    fn the_section_priority_wins_over_the_heading() {
+        let doc = "## P0 — Critical\n\n### P2 — Odd Label\n- [ ] urgent\n";
+        let items = parse_todo_file(
+            Path::new("f"),
+            "f",
+            doc,
+            &PriorityConfig {
+                source: PrioritySource::Heading,
+                pattern: "^P([0-3])".to_string(),
+            },
+            &DueConfig::default(),
+        );
+        assert_eq!(items[0].priority, Priority::P0);
     }
 
     #[test]

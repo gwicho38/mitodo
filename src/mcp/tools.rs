@@ -36,9 +36,12 @@ pub const TOOLS: [Tool; 13] = [
     },
     Tool {
         name: "todos_create_item",
-        description: "Add a new item to a group. section names the heading to place it under. \
-                      Optionally attach notes and child items.",
-        schema: r#"{"type":"object","properties":{"group":{"type":"string"},"text":{"type":"string"},"section":{"type":"string"},"notes":{"type":"string"},"children":{"type":"array","items":{"type":"string"}}},"required":["group","text"],"additionalProperties":false}"#,
+        description: "Add a new item to a group. section names the ## heading to place it under \
+                      (a prefix such as \"P1\" is enough); heading names a ### heading, searched \
+                      inside section when both are given. Where an item lands sets its priority, so \
+                      a file organised into sections needs section and/or heading; errors list the \
+                      ones that exist. Optionally attach notes and child items.",
+        schema: r#"{"type":"object","properties":{"group":{"type":"string"},"text":{"type":"string"},"section":{"type":"string"},"heading":{"type":"string"},"notes":{"type":"string"},"children":{"type":"array","items":{"type":"string"}}},"required":["group","text"],"additionalProperties":false}"#,
     },
     Tool {
         name: "todos_add_child",
