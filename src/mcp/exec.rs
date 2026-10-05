@@ -182,29 +182,45 @@ fn todos_create_item(state: &mut ServerState, arguments: &Value) -> Result<Value
     let group = group_by_name(&workspace, &group_name)?;
     let path = group.todo_file.clone();
     let section = arguments.get("section").and_then(|v| v.as_str());
+    let heading = arguments.get("heading").and_then(|v| v.as_str());
 
-    // A named section the file lacks would otherwise land at end of file, and
-    // priority is derived from the heading above an item: the agent would be told
-    // it filed a P0 that is not one.
-    if let Some(wanted) = section {
-        let body =
-            std::fs::read_to_string(&path).map_err(|e| ("validation_error", e.to_string()))?;
-        let found = body.lines().any(|line| {
-            line.strip_prefix("## ").is_some_and(|heading| {
-                heading
-                    .trim()
-                    .to_lowercase()
-                    .starts_with(&wanted.trim().to_lowercase())
-            })
-        });
-        if !found {
-            return Err((
-                "missing_priority_section",
-                format!(
-                    "{group_name} has no section starting {wanted:?}; sections are never invented"
-                ),
-            ));
-        }
+    // Priority is derived from the headings above an item, so where it lands is
+    // what priority it has. Anything that would make the file decide for the
+    // agent — a section or heading the file lacks, or no placement at all in a
+    // file that has sections — is refused with the choices that do exist.
+    let body = std::fs::read_to_string(&path).map_err(|e| ("validation_error", e.to_string()))?;
+    let outline = Outline::of(&body);
+    if let Some(wanted) = section
+        && !outline.has_section(wanted)
+    {
+        return Err((
+            "missing_priority_section",
+            format!(
+                "{group_name} has no section starting {wanted:?}; sections are never invented. {}",
+                outline.describe()
+            ),
+        ));
+    }
+    if let Some(wanted) = heading
+        && !outline.has_heading(section, wanted)
+    {
+        let scope = section.map_or(String::new(), |s| format!(" in section {s:?}"));
+        return Err((
+            "missing_heading",
+            format!(
+                "{group_name} has no ### heading starting {wanted:?}{scope}; headings are never invented. {}",
+                outline.describe()
+            ),
+        ));
+    }
+    if section.is_none() && heading.is_none() && !outline.sections.is_empty() {
+        return Err((
+            "section_required",
+            format!(
+                "{group_name} is organised into sections; pass section and/or heading. {}",
+                outline.describe()
+            ),
+        ));
     }
 
     let notes = arguments
@@ -221,7 +237,8 @@ fn todos_create_item(state: &mut ServerState, arguments: &Value) -> Result<Value
         })
         .unwrap_or_default();
 
-    crate::store::create_item(&path, section, text.trim(), notes, &children).map_err(describe)?;
+    crate::store::create_item_under(&path, section, heading, text.trim(), notes, &children)
+        .map_err(describe)?;
 
     let reloaded = load_workspace(state)?;
     let created = reloaded
@@ -231,6 +248,81 @@ fn todos_create_item(state: &mut ServerState, arguments: &Value) -> Result<Value
         .ok_or_else(|| ("conflict", "the item was written but not found".to_string()))?;
     let owner = group_of(&reloaded, created);
     Ok(json!({"item": item_json(created, &owner)}))
+}
+
+/// The `## ` sections of a todo file and the `### ` headings inside each, in
+/// file order, for placement checks and for telling an agent what exists.
+struct Outline {
+    sections: Vec<(String, Vec<String>)>,
+    /// `### ` headings that come before any `## ` section.
+    loose: Vec<String>,
+}
+
+impl Outline {
+    fn of(body: &str) -> Self {
+        let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+        let mut loose = Vec::new();
+        for line in body.lines() {
+            if let Some(name) = line.strip_prefix("## ") {
+                sections.push((name.trim().to_string(), Vec::new()));
+            } else if let Some(name) = line.strip_prefix("### ") {
+                match sections.last_mut() {
+                    Some((_, headings)) => headings.push(name.trim().to_string()),
+                    None => loose.push(name.trim().to_string()),
+                }
+            }
+        }
+        Self { sections, loose }
+    }
+
+    fn has_section(&self, wanted: &str) -> bool {
+        self.sections
+            .iter()
+            .any(|(name, _)| starts_with(name, wanted))
+    }
+
+    /// Mirrors `store::create_item_under`: inside the first matching section
+    /// when one is named, otherwise anywhere in the file.
+    fn has_heading(&self, section: Option<&str>, wanted: &str) -> bool {
+        match section {
+            Some(s) => self
+                .sections
+                .iter()
+                .find(|(name, _)| starts_with(name, s))
+                .is_some_and(|(_, headings)| headings.iter().any(|h| starts_with(h, wanted))),
+            None => self
+                .loose
+                .iter()
+                .chain(self.sections.iter().flat_map(|(_, h)| h.iter()))
+                .any(|h| starts_with(h, wanted)),
+        }
+    }
+
+    fn describe(&self) -> String {
+        let listed: Vec<String> = self
+            .sections
+            .iter()
+            .map(|(name, headings)| {
+                if headings.is_empty() {
+                    format!("{name:?}")
+                } else {
+                    let inner: Vec<String> = headings.iter().map(|h| format!("{h:?}")).collect();
+                    format!("{name:?} (headings: {})", inner.join(", "))
+                }
+            })
+            .collect();
+        if listed.is_empty() {
+            "The file has no sections.".to_string()
+        } else {
+            format!("Sections: {}.", listed.join("; "))
+        }
+    }
+}
+
+fn starts_with(name: &str, wanted: &str) -> bool {
+    name.trim()
+        .to_lowercase()
+        .starts_with(&wanted.trim().to_lowercase())
 }
 
 /// A group name is a name, never a path: the server joins it onto the workspace
@@ -656,11 +748,35 @@ mod tests {
         );
     }
 
-    // No section named means "wherever create_item puts it", which is the
-    // existing behaviour the TUI's own add relies on.
+    // Without a section the item would be appended to the end of the file and
+    // silently take the last section's priority (often "P3 — Reference"). The
+    // TUI's own add still appends; only the agent-facing tool asks.
     #[test]
-    fn creating_without_a_section_is_not_refused() {
-        let (_dir, config) = fixture(&[("lefv", "## P1 — Later\n\n- [ ] existing\n")]);
+    fn creating_without_a_section_in_a_sectioned_file_is_refused() {
+        let (dir, config) = fixture(&[("lefv", "## P1 — Later\n\n### Deal\n- [ ] existing\n")]);
+        let before = std::fs::read_to_string(dir.path().join("lefv/TODO.md")).unwrap();
+        let failure = run_tool(
+            &config,
+            "todos_create_item",
+            json!({"group": "lefv", "text": "somewhere"}),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, "section_required");
+        assert!(failure.1.contains("P1 — Later"), "{}", failure.1);
+        assert!(
+            failure.1.contains("Deal"),
+            "lists headings too: {}",
+            failure.1
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("lefv/TODO.md")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn creating_without_a_section_in_a_flat_file_appends() {
+        let (dir, config) = fixture(&[("lefv", "- [ ] existing\n")]);
         let created = run_tool(
             &config,
             "todos_create_item",
@@ -668,6 +784,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(created["item"]["text"], "somewhere");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("lefv/TODO.md")).unwrap(),
+            "- [ ] existing\n- [ ] somewhere\n"
+        );
+    }
+
+    #[test]
+    fn a_missing_section_error_lists_the_sections_there_are() {
+        let (_dir, config) = fixture(&[("lefv", "## P1 — Later\n\n- [ ] existing\n")]);
+        let failure = run_tool(
+            &config,
+            "todos_create_item",
+            json!({"group": "lefv", "text": "urgent", "section": "P0"}),
+        )
+        .unwrap_err();
+        assert!(failure.1.contains("P1 — Later"), "{}", failure.1);
+    }
+
+    const CLIENTS: &str = "## Active Client Matters\n\n### P1 — 4Sight Deal Docs\n- [x] done thing\n\n### P1 — HorizMed\n- [ ] other\n\n## P3 — Reference\n\n### Key Contacts\n- [ ] someone\n";
+
+    #[test]
+    fn creating_under_a_heading_lands_there_with_its_priority() {
+        let (dir, config) = fixture(&[("holon", CLIENTS)]);
+        let created = run_tool(
+            &config,
+            "todos_create_item",
+            json!({"group": "holon", "text": "notice", "heading": "P1 — 4Sight", "children": ["step"]}),
+        )
+        .unwrap();
+        assert_eq!(created["item"]["heading"], "P1 — 4Sight Deal Docs");
+        assert_eq!(created["item"]["priority"], "P1");
+        let written = std::fs::read_to_string(dir.path().join("holon/TODO.md")).unwrap();
+        assert!(
+            written.contains("- [x] done thing\n- [ ] notice\n  - [ ] step\n\n### P1 — HorizMed"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn creating_under_a_heading_the_file_lacks_is_refused() {
+        let (dir, config) = fixture(&[("holon", CLIENTS)]);
+        let failure = run_tool(
+            &config,
+            "todos_create_item",
+            json!({"group": "holon", "text": "x", "heading": "Nope"}),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, "missing_heading");
+        assert!(failure.1.contains("P1 — 4Sight Deal Docs"), "{}", failure.1);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("holon/TODO.md")).unwrap(),
+            CLIENTS,
+            "a refused create writes nothing"
+        );
+    }
+
+    #[test]
+    fn a_heading_outside_the_named_section_is_refused() {
+        let (_dir, config) = fixture(&[("holon", CLIENTS)]);
+        let failure = run_tool(
+            &config,
+            "todos_create_item",
+            json!({"group": "holon", "text": "x", "section": "P3", "heading": "P1 — 4Sight"}),
+        )
+        .unwrap_err();
+        assert_eq!(failure.0, "missing_heading");
     }
 
     // The directory must exist: Workspace::load only records an archive_dir it

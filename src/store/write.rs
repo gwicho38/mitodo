@@ -217,12 +217,29 @@ pub fn create_item(
     description: &str,
     children: &[String],
 ) -> Result<(), WriteError> {
+    create_item_under(path, section, None, text, description, children)
+}
+
+/// [`create_item`], optionally narrowed to a `### ` heading.
+///
+/// With `heading`, the item lands after the last item under the first `### `
+/// heading that starts with it — searched inside `section` when one is given,
+/// otherwise across the file. A heading that cannot be found falls back to the
+/// section (or end of file); callers that must not guess check first.
+pub fn create_item_under(
+    path: &Path,
+    section: Option<&str>,
+    heading: Option<&str>,
+    text: &str,
+    description: &str,
+    children: &[String],
+) -> Result<(), WriteError> {
     let (mut lines, ending, trailing) = read_lines(path)?;
 
-    let at = match section.and_then(|s| section_insert_point(&lines, s)) {
-        Some(index) => index,
-        None => lines.len(),
-    };
+    let by_heading = heading.and_then(|h| heading_insert_point(&lines, section, h));
+    let at = by_heading
+        .or_else(|| section.and_then(|s| section_insert_point(&lines, s)))
+        .unwrap_or(lines.len());
 
     let mut block = vec![format!("- [ ] {}", text.trim())];
     for note in description.lines().filter(|l| !l.trim().is_empty()) {
@@ -238,30 +255,55 @@ pub fn create_item(
     write_lines(path, &lines, ending, trailing)
 }
 
-/// Where a new item should go within `section`, or `None` if it is absent.
-fn section_insert_point(lines: &[String], section: &str) -> Option<usize> {
+/// The line range `[start, end)` of the `## ` section starting with `section`,
+/// where `start` is the heading line itself.
+fn section_range(lines: &[String], section: &str) -> Option<(usize, usize)> {
     let needle = section.trim().to_lowercase();
     let start = lines
         .iter()
         .position(|l| l.starts_with("## ") && l[3..].trim().to_lowercase().starts_with(&needle))?;
-
-    // The section runs to the next "## " heading, or the end of the file.
     let end = lines
         .iter()
         .enumerate()
         .skip(start + 1)
         .find(|(_, l)| l.starts_with("## "))
         .map_or(lines.len(), |(index, _)| index);
+    Some((start, end))
+}
 
-    // After the last item in the section, including anything it owns.
-    let last_item = (start + 1..end).rev().find(|i| is_checkbox(&lines[*i]));
-    Some(match last_item {
+/// Where a new item should go under the `### ` heading starting with `heading`
+/// (inside `section` if given), or `None` if there is no such heading.
+fn heading_insert_point(lines: &[String], section: Option<&str>, heading: &str) -> Option<usize> {
+    let (from, to) = match section {
+        Some(s) => section_range(lines, s)?,
+        None => (0, lines.len()),
+    };
+    let needle = heading.trim().to_lowercase();
+    let start = (from..to).find(|i| {
+        lines[*i].starts_with("### ") && lines[*i][4..].trim().to_lowercase().starts_with(&needle)
+    })?;
+    // The heading's block runs to the next ### or ## heading.
+    let end = (start + 1..to)
+        .find(|i| lines[*i].starts_with("### ") || lines[*i].starts_with("## "))
+        .unwrap_or(to);
+    Some(insert_point_in(lines, start, end))
+}
+
+/// After the last item in `(start, end)`, including anything it owns; with no
+/// items, just below the heading at `start`, past any blank line.
+fn insert_point_in(lines: &[String], start: usize, end: usize) -> usize {
+    match (start + 1..end).rev().find(|i| is_checkbox(&lines[*i])) {
         Some(index) => description_end(lines, index),
-        // No items yet: just below the heading, past any blank line.
         None => (start + 1..end)
             .find(|i| !lines[*i].trim().is_empty())
             .unwrap_or(end),
-    })
+    }
+}
+
+/// Where a new item should go within `section`, or `None` if it is absent.
+fn section_insert_point(lines: &[String], section: &str) -> Option<usize> {
+    let (start, end) = section_range(lines, section)?;
+    Some(insert_point_in(lines, start, end))
 }
 
 fn is_checkbox(line: &str) -> bool {
@@ -599,6 +641,56 @@ mod tests {
             fs::read_to_string(&path)
                 .unwrap()
                 .ends_with("- [ ] orphan\n")
+        );
+    }
+
+    // --- creating under a ### heading ---
+
+    const HEADED: &str = "## Active Client Matters\n\n### P1 — Alpha Deal\n- note line\n- [ ] alpha one\n  - [ ] alpha child\n\n### P1 — Beta Deal\n- [ ] beta one\n\n## P3 — Reference\n\n### Key Contacts\n- [ ] someone\n";
+
+    #[test]
+    fn a_new_item_lands_under_the_named_heading() {
+        let (_d, path) = write_temp(HEADED);
+        create_item_under(&path, None, Some("P1 — Alpha"), "fresh", "", &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "## Active Client Matters\n\n### P1 — Alpha Deal\n- note line\n- [ ] alpha one\n  - [ ] alpha child\n- [ ] fresh\n\n### P1 — Beta Deal\n- [ ] beta one\n\n## P3 — Reference\n\n### Key Contacts\n- [ ] someone\n"
+        );
+    }
+
+    #[test]
+    fn a_heading_is_looked_up_inside_the_named_section_only() {
+        let doc = "## P0 — Now\n\n### Shared\n- [ ] urgent\n\n## P2 — Later\n\n### Shared\n- [ ] someday\n";
+        let (_d, path) = write_temp(doc);
+        create_item_under(&path, Some("P2"), Some("Shared"), "fresh", "", &[]).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .ends_with("- [ ] someday\n- [ ] fresh\n"),
+            "goes under the P2 copy of the heading"
+        );
+    }
+
+    #[test]
+    fn an_empty_heading_takes_the_item_beneath_it() {
+        let doc = "## Active\n\n### Empty Deal\n\n### Busy Deal\n- [ ] busy\n";
+        let (_d, path) = write_temp(doc);
+        create_item_under(&path, None, Some("Empty Deal"), "first", "", &[]).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.find("first").unwrap() < text.find("### Busy").unwrap(),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn creating_under_a_heading_leaves_the_rest_byte_identical() {
+        let messy = "---\r\ntags: [a]\r\n---\r\n## Active\r\n\r\n### Deal\r\n- [ ] keep\t\r\n\r\n### Other\r\n- [ ] also keep";
+        let (_d, path) = write_temp(messy);
+        create_item_under(&path, None, Some("Deal"), "new", "", &[]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "---\r\ntags: [a]\r\n---\r\n## Active\r\n\r\n### Deal\r\n- [ ] keep\t\r\n- [ ] new\r\n\r\n### Other\r\n- [ ] also keep"
         );
     }
 
